@@ -455,9 +455,145 @@ adam_status_t adam_audio_play(adam_settings_t *s,
     return default_audio_play(audio, len, format);
 }
 
+// ============================================================================
+// MARK: - Streaming TTS (PCM: curl → ring buffer → miniaudio, overlapped)
+// ============================================================================
+
+#ifndef ADAM_NO_CURL
+
+// curl write callback that feeds PCM directly to the player
+typedef struct {
+    adam_pcm_player_t *player;
+    long               http_code;
+    int                error;
+} stream_tts_ctx_t;
+
+static size_t stream_tts_write_cb(char *data, size_t size, size_t nmemb,
+                                   void *userp) {
+    stream_tts_ctx_t *ctx = (stream_tts_ctx_t *)userp;
+    size_t bytes = size * nmemb;
+
+    if (ctx->player && !ctx->error) {
+        adam_pcm_player_feed(ctx->player, (const uint8_t *)data, bytes);
+    }
+    return bytes;
+}
+
+static adam_status_t cloud_tts_streaming(
+    adam_settings_t *s, const char *text
+) {
+    // Start PCM player immediately (OpenAI PCM is 24kHz mono s16le)
+    adam_pcm_player_t *player = adam_pcm_player_start(24000, 1);
+    if (!player) return ADAM_ERR_VOICE;
+
+    if (!s->_curl_tts) s->_curl_tts = curl_easy_init();
+    CURL *curl = (CURL *)s->_curl_tts;
+    if (!curl) {
+        adam_pcm_player_finish(player);
+        return ADAM_ERR_CURL;
+    }
+    curl_easy_reset(curl);
+
+    const char *url = s->tts_api_url
+        ? s->tts_api_url
+        : "https://api.openai.com/v1/audio/speech";
+
+    const char *key = s->tts_api_key ? s->tts_api_key : s->api_key;
+    if (!key) {
+        adam_pcm_player_finish(player);
+        return ADAM_ERR_AUTH;
+    }
+
+    // Build JSON body — force response_format=pcm for streaming
+    size_t text_len = strlen(text);
+    size_t body_cap = text_len * 2 + 256;
+    char *body = malloc(body_cap);
+    if (!body) {
+        adam_pcm_player_finish(player);
+        return ADAM_ERR_ALLOC;
+    }
+
+    size_t pos = 0;
+    pos += (size_t)snprintf(body + pos, body_cap - pos,
+        "{\"model\":\"%s\",\"voice\":\"%s\",\"response_format\":\"pcm\",\"input\":\"",
+        s->tts_model ? s->tts_model : "gpt-4o-mini-tts",
+        s->tts_voice ? s->tts_voice : "coral");
+
+    for (size_t i = 0; i < text_len && pos < body_cap - 10; i++) {
+        char c = text[i];
+        switch (c) {
+        case '"':  body[pos++] = '\\'; body[pos++] = '"';  break;
+        case '\\': body[pos++] = '\\'; body[pos++] = '\\'; break;
+        case '\n': body[pos++] = '\\'; body[pos++] = 'n';  break;
+        case '\r': body[pos++] = '\\'; body[pos++] = 'r';  break;
+        case '\t': body[pos++] = '\\'; body[pos++] = 't';  break;
+        default:   body[pos++] = c;
+        }
+    }
+    pos += (size_t)snprintf(body + pos, body_cap - pos, "\"}");
+
+    char *auth_hdr = malloc(strlen(key) + 32);
+    snprintf(auth_hdr, strlen(key) + 32, "Authorization: Bearer %s", key);
+
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, auth_hdr);
+
+    stream_tts_ctx_t write_ctx = { .player = player };
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, body);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_tts_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
+
+    CURLcode res = curl_easy_perform(curl);
+    adam_status_t status = ADAM_OK;
+
+    if (res != CURLE_OK) {
+        status = ADAM_ERR_CURL;
+    } else {
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        if (http_code == 429) status = ADAM_ERR_RATE_LIMIT;
+        else if (http_code == 401 || http_code == 403) status = ADAM_ERR_AUTH;
+        else if (http_code >= 400) status = ADAM_ERR_VOICE;
+    }
+
+    curl_slist_free_all(headers);
+    free(auth_hdr);
+    free(body);
+
+    // Wait for playback to drain, then stop
+    adam_pcm_player_finish(player);
+    return status;
+}
+
+#endif // ADAM_NO_CURL
+
+// ============================================================================
+
 adam_status_t adam_tts_speak(adam_settings_t *s, const char *text) {
     if (!s || !text) return ADAM_ERR_INVALID_PARAM;
 
+#ifndef ADAM_NO_CURL
+    // Use streaming path for cloud TTS (overlaps download + playback)
+    if (s->tts_backend == ADAM_TTS_CLOUD && !s->tts_fn) {
+        // Retry on rate limit
+        int backoff[] = {2000, 5000, 10000, 20000};
+        for (int attempt = 0; attempt <= 4; attempt++) {
+            adam_status_t rc = cloud_tts_streaming(s, text);
+            if (rc != ADAM_ERR_RATE_LIMIT) return rc;
+            if (attempt == 4) return rc;
+            fprintf(stderr, "  [TTS] rate limited, retrying in %dms (%d/4)\n",
+                    backoff[attempt], attempt + 1);
+            voice_sleep_ms(backoff[attempt]);
+        }
+    }
+#endif
+
+    // Fallback: non-streaming path (synthesize fully, then play)
     arena_t *arena = arena_create(256 * 1024);
     if (!arena) return ADAM_ERR_ALLOC;
 

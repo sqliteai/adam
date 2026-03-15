@@ -22,6 +22,16 @@ extern "C" {
 adam_status_t adam_audio_play_miniaudio(
     const uint8_t *audio_data, size_t audio_len, adam_audio_format_t format);
 
+// Streaming PCM playback: start device, then feed chunks, then finish.
+// The device plays audio in real-time as chunks arrive.
+// PCM format: signed 16-bit LE, 24000 Hz, mono (OpenAI TTS PCM output).
+typedef struct adam_pcm_player_t adam_pcm_player_t;
+
+adam_pcm_player_t *adam_pcm_player_start(int sample_rate, int channels);
+void               adam_pcm_player_feed(adam_pcm_player_t *p,
+                       const uint8_t *pcm_data, size_t len);
+void               adam_pcm_player_finish(adam_pcm_player_t *p); // waits for drain, then stops
+
 // Record from the default microphone.
 // Returns a malloc'd WAV buffer (16kHz, mono, PCM16). Caller must free.
 // Blocks until max_seconds elapse or *stop_flag is set to non-zero.

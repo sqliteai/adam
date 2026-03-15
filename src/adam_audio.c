@@ -125,6 +125,121 @@ adam_status_t adam_audio_play_miniaudio(
 }
 
 // ============================================================================
+// MARK: - Streaming PCM Playback
+// ============================================================================
+
+// Lock-free-ish ring buffer for producer (curl) → consumer (miniaudio).
+// Single producer, single consumer. Sizes are power-of-two for fast modulo.
+
+#define PCM_RING_SIZE (256 * 1024)  // 256 KB ≈ ~5s of 24kHz mono s16
+
+#include <pthread.h>
+
+typedef struct adam_pcm_player_t adam_pcm_player_t;
+
+struct adam_pcm_player_t {
+    ma_device    device;
+    int16_t      ring[PCM_RING_SIZE / sizeof(int16_t)];
+    volatile size_t write_pos;   // producer (curl thread) writes here (in samples)
+    volatile size_t read_pos;    // consumer (audio thread) reads here (in samples)
+    volatile int    finished;    // producer sets when no more data
+    volatile int    started;     // set once device is running
+    int             sample_rate;
+    int             channels;
+};
+
+#define RING_SAMPLES (PCM_RING_SIZE / sizeof(int16_t))
+
+static size_t ring_available(adam_pcm_player_t *p) {
+    size_t w = p->write_pos;
+    size_t r = p->read_pos;
+    return (w >= r) ? (w - r) : (RING_SAMPLES - r + w);
+}
+
+static void pcm_playback_callback(ma_device *device, void *output,
+                                    const void *input, ma_uint32 frame_count) {
+    (void)input;
+    adam_pcm_player_t *p = (adam_pcm_player_t *)device->pUserData;
+    int16_t *out = (int16_t *)output;
+    size_t frames_needed = frame_count * (size_t)p->channels;
+    size_t avail = ring_available(p);
+
+    size_t to_read = (avail < frames_needed) ? avail : frames_needed;
+    for (size_t i = 0; i < to_read; i++) {
+        out[i] = p->ring[p->read_pos % RING_SAMPLES];
+        p->read_pos = (p->read_pos + 1) % RING_SAMPLES;
+    }
+    // Fill remainder with silence
+    for (size_t i = to_read; i < frames_needed; i++) {
+        out[i] = 0;
+    }
+}
+
+adam_pcm_player_t *adam_pcm_player_start(int sample_rate, int channels) {
+    adam_pcm_player_t *p = calloc(1, sizeof(adam_pcm_player_t));
+    if (!p) return NULL;
+
+    p->sample_rate = sample_rate;
+    p->channels = channels;
+
+    ma_device_config config = ma_device_config_init(ma_device_type_playback);
+    config.playback.format   = ma_format_s16;
+    config.playback.channels = (ma_uint32)channels;
+    config.sampleRate        = (ma_uint32)sample_rate;
+    config.dataCallback      = pcm_playback_callback;
+    config.pUserData         = p;
+    config.periodSizeInMilliseconds = 50;  // low latency
+
+    if (ma_device_init(NULL, &config, &p->device) != MA_SUCCESS) {
+        free(p);
+        return NULL;
+    }
+
+    if (ma_device_start(&p->device) != MA_SUCCESS) {
+        ma_device_uninit(&p->device);
+        free(p);
+        return NULL;
+    }
+
+    p->started = 1;
+    return p;
+}
+
+void adam_pcm_player_feed(adam_pcm_player_t *p, const uint8_t *pcm_data, size_t len) {
+    if (!p || !pcm_data || len == 0) return;
+
+    // pcm_data is raw int16_t samples (little-endian)
+    size_t samples = len / sizeof(int16_t);
+    const int16_t *src = (const int16_t *)pcm_data;
+
+    for (size_t i = 0; i < samples; i++) {
+        // Spin-wait if ring is full (very rare — playback is real-time)
+        size_t next = (p->write_pos + 1) % RING_SAMPLES;
+        while (next == p->read_pos) {
+            ma_sleep(1);
+        }
+        p->ring[p->write_pos] = src[i];
+        p->write_pos = next;
+    }
+}
+
+void adam_pcm_player_finish(adam_pcm_player_t *p) {
+    if (!p) return;
+
+    p->finished = 1;
+
+    // Wait for ring buffer to drain
+    while (ring_available(p) > 0) {
+        ma_sleep(20);
+    }
+    // Extra delay to let the last audio buffer play out
+    ma_sleep(150);
+
+    ma_device_uninit(&p->device);
+    free(p);
+}
+
+// ============================================================================
 // MARK: - Audio Capture (Microphone Recording)
 // ============================================================================
 
