@@ -14,6 +14,7 @@
 //
 
 #include "adam.h"
+#include "adam_audio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -95,76 +96,43 @@ static adam_status_t macos_tts_play(void *ctx, arena_t *arena,
 }
 
 // ============================================================================
-// MARK: - Microphone recording
+// MARK: - Microphone recording (via miniaudio)
 // ============================================================================
-
-#ifdef __APPLE__
-// Defined in adam_mic_macos.m
-extern int adam_mic_record_wav(const char *output_path, int max_seconds,
-                               volatile int *stop_flag);
-#endif
 
 static volatile int g_stop_recording = 0;
 
 #ifndef ADAM_NO_PTHREADS
-// Thread that waits for Enter key to stop recording
 static void *wait_for_enter(void *arg) {
     UNUSED_PARAM(arg);
-    getchar(); // blocks until Enter
+    getchar();
     g_stop_recording = 1;
     return NULL;
 }
 #endif
 
-// Record from microphone, return WAV data.
-// Caller must free the returned buffer.
 static uint8_t *record_from_mic(size_t *out_len, int max_seconds) {
-    *out_len = 0;
-    const char *tmpfile = "/tmp/adam_voice_input.wav";
-
-#ifdef __APPLE__
     g_stop_recording = 0;
 
 #ifndef ADAM_NO_PTHREADS
-    // Start a thread to listen for Enter key
     pthread_t enter_thread;
     pthread_create(&enter_thread, NULL, wait_for_enter, NULL);
 #endif
 
     printf("  [Recording... press Enter to stop]\n");
-    int rc = adam_mic_record_wav(tmpfile, max_seconds, &g_stop_recording);
+    uint8_t *wav = adam_audio_record(16000, max_seconds,
+                                     &g_stop_recording, out_len);
 
 #ifndef ADAM_NO_PTHREADS
-    // Cancel the enter thread if still waiting
+    g_stop_recording = 1; // signal thread to exit if still waiting
     pthread_cancel(enter_thread);
     pthread_join(enter_thread, NULL);
 #endif
 
-    if (rc != 0) {
+    if (!wav || *out_len == 0) {
         printf("  [Recording failed]\n");
         return NULL;
     }
-#else
-    printf("  [Recording not available on this platform]\n");
-    return NULL;
-#endif
-
-    // Read the WAV file
-    FILE *f = fopen(tmpfile, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long flen = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (flen <= 0) { fclose(f); return NULL; }
-
-    uint8_t *buf = malloc((size_t)flen);
-    if (!buf) { fclose(f); return NULL; }
-    fread(buf, 1, (size_t)flen, f);
-    fclose(f);
-    remove(tmpfile);
-
-    *out_len = (size_t)flen;
-    return buf;
+    return wav;
 }
 
 // ============================================================================

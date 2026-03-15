@@ -17,8 +17,11 @@ CURL_BUILD    := $(CURL_DIR)/build
 # ============================================================================
 
 CC       ?= cc
+MINIAUDIO_DIR := $(ADAM_ROOT)modules/miniaudio
+
 CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic -O2
 CFLAGS   += -Isrc -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
+CFLAGS   += -I$(MINIAUDIO_DIR)
 CFLAGS   += -DADAM_NO_LOCAL -DADAM_NO_SQLITE
 
 # Static libraries
@@ -33,13 +36,17 @@ LDFLAGS  := -lpthread -lz
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
   LDFLAGS += -framework SystemConfiguration -framework Security -framework CoreFoundation
+  LDFLAGS += -framework CoreAudio -framework AudioToolbox  # miniaudio
+endif
+ifeq ($(UNAME_S),Linux)
+  LDFLAGS += -ldl -lm  # miniaudio on Linux (ALSA loaded dynamically)
 endif
 
 # ============================================================================
 # Sources
 # ============================================================================
 
-SRCS := src/arena.c src/adam.c src/adam_json.c src/adam_http.c src/adam_voice.c
+SRCS := src/arena.c src/adam.c src/adam_json.c src/adam_http.c src/adam_voice.c src/adam_audio.c
 OBJS := $(SRCS:.c=.o)
 
 # ============================================================================
@@ -77,11 +84,10 @@ test_live: libadam.a test/test_live.c
 voice: test_voice_interactive
 	./test_voice_interactive
 
-test_voice_interactive: libadam.a test/test_voice_interactive.c src/adam_mic_macos.m
+test_voice_interactive: libadam.a test/test_voice_interactive.c
 	$(CC) $(CFLAGS) -g \
-		test/test_voice_interactive.c src/adam_mic_macos.m \
+		test/test_voice_interactive.c \
 		-L. -ladam $(LIBS) $(LDFLAGS) \
-		-framework AVFoundation -framework Foundation \
 		-o $@
 
 # --- Dependencies ---

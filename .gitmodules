@@ -4,3 +4,6 @@
 [submodule "modules/curl"]
 	path = modules/curl
 	url = https://github.com/curl/curl.git
+[submodule "modules/miniaudio"]
+	path = modules/miniaudio
+	url = https://github.com/mackron/miniaudio.git

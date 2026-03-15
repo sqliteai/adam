@@ -8,6 +8,7 @@
 #if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
 
 #include "adam.h"
+#include "adam_audio.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -297,47 +298,13 @@ static adam_status_t cloud_tts(
 #endif // ADAM_NO_CURL
 
 // ============================================================================
-// MARK: - Default audio playback (platform-specific)
+// MARK: - Default audio playback (via miniaudio)
 // ============================================================================
 
 static adam_status_t default_audio_play(
     const uint8_t *audio, size_t len, adam_audio_format_t format
 ) {
-    // Write to temp file, play with system command
-    const char *ext;
-    switch (format) {
-    case ADAM_AUDIO_WAV:      ext = ".wav";  break;
-    case ADAM_AUDIO_MP3:      ext = ".mp3";  break;
-    case ADAM_AUDIO_OGG_OPUS: ext = ".ogg";  break;
-    case ADAM_AUDIO_FLAC:     ext = ".flac"; break;
-    default:                  ext = ".mp3";  break;
-    }
-
-    char tmppath[256];
-    snprintf(tmppath, sizeof(tmppath), "/tmp/adam_tts_%d%s", (int)getpid(), ext);
-
-    FILE *f = fopen(tmppath, "wb");
-    if (!f) return ADAM_ERR_VOICE;
-    fwrite(audio, 1, len, f);
-    fclose(f);
-
-    char cmd[512];
-#ifdef __APPLE__
-    snprintf(cmd, sizeof(cmd), "afplay \"%s\" 2>/dev/null", tmppath);
-#elif defined(__linux__)
-    if (format == ADAM_AUDIO_WAV)
-        snprintf(cmd, sizeof(cmd), "aplay \"%s\" 2>/dev/null", tmppath);
-    else
-        snprintf(cmd, sizeof(cmd), "mpv --no-video \"%s\" 2>/dev/null || "
-                 "ffplay -nodisp -autoexit \"%s\" 2>/dev/null", tmppath, tmppath);
-#else
-    // Generic fallback
-    snprintf(cmd, sizeof(cmd), "echo 'No audio player available'");
-#endif
-
-    int ret = system(cmd);
-    remove(tmppath);
-    return (ret == 0) ? ADAM_OK : ADAM_ERR_VOICE;
+    return adam_audio_play_miniaudio(audio, len, format);
 }
 
 // ============================================================================
