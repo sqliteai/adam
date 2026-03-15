@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
+#include <signal.h>
 #include <pthread.h>
 
 #define UNUSED_PARAM(p) ((void)(p))
@@ -90,32 +90,16 @@ static uint8_t *record_speech(size_t *out_len) {
 }
 
 // ============================================================================
-// MARK: - Case-insensitive word check
+// MARK: - Signal handling (Ctrl+C to quit)
 // ============================================================================
 
-static int contains_quit(const char *text) {
-    if (!text) return 0;
-    // Normalize to lowercase for matching
-    const char *quit_words[] = {
-        "quit", "exit", "stop", "bye", "goodbye",
-        "esci", "basta", "fine", "arrivederci",   // Italian
-        "salir", "adiós", "adios",                 // Spanish
-        "quitter", "au revoir",                    // French
-        "aufhören", "tschüss",                     // German
-        NULL
-    };
-    char lower[512];
-    size_t len = strlen(text);
-    if (len >= sizeof(lower)) len = sizeof(lower) - 1;
-    for (size_t i = 0; i < len; i++)
-        lower[i] = (char)tolower((unsigned char)text[i]);
-    lower[len] = '\0';
+static volatile int g_quit = 0;
 
-    for (int i = 0; quit_words[i]; i++) {
-        if (strstr(lower, quit_words[i]))
-            return 1;
-    }
-    return 0;
+static void sigint_handler(int sig) {
+    (void)sig;
+    g_quit = 1;
+    // Also stop any ongoing recording
+    g_stop_recording = 1;
 }
 
 // ============================================================================
@@ -191,21 +175,25 @@ int main(void) {
     printf("  ║  TTS: OpenAI TTS nova (cloud) + miniaudio    ║\n");
     printf("  ╠══════════════════════════════════════════════╣\n");
     printf("  ║  Speak naturally. Press Enter when done.     ║\n");
-    printf("  ║  Say \"quit\" or \"exit\" to end.               ║\n");
+    printf("  ║  Press Ctrl+C to exit.                       ║\n");
     printf("  ║  Speak any language — replies match yours.   ║\n");
     printf("  ╚══════════════════════════════════════════════╝\n\n");
+
+    signal(SIGINT, sigint_handler);
 
     adam_history_t *h = adam_history_create();
     int turn = 0;
     float total_cost = 0.0f;
 
-    while (1) {
+    while (!g_quit) {
         turn++;
         printf("  [Turn %d] ", turn);
 
         // 1. Record from microphone
         size_t audio_len = 0;
         uint8_t *audio = record_speech(&audio_len);
+
+        if (g_quit) { free(audio); break; }
 
         if (!audio || audio_len < 1000) {
             printf("    (no speech detected, try again)\n\n");
@@ -221,6 +209,8 @@ int main(void) {
             audio, audio_len, ADAM_AUDIO_WAV, &transcript);
         free(audio);
 
+        if (g_quit) { arena_destroy(stt_arena); break; }
+
         if (stt_rc != ADAM_OK || !transcript || strlen(transcript) == 0) {
             printf("    (transcription failed: %s)\n\n",
                    adam_status_string(stt_rc));
@@ -230,28 +220,15 @@ int main(void) {
 
         printf("    You: \"%s\"\n", transcript);
 
-        // 3. Check for quit command
-        if (contains_quit(transcript)) {
-            printf("    (quit command detected)\n");
-            // Say goodbye
-            adam_run_result_t bye = adam_run(s, h,
-                "The user said goodbye. Say a brief, warm goodbye in their language.");
-            if (bye.status == ADAM_OK && bye.final_response) {
-                printf("    Adam: %s\n", bye.final_response);
-                adam_tts_speak(s, bye.final_response);
-            }
-            adam_run_result_free(&bye);
-            arena_destroy(stt_arena);
-            break;
-        }
-
         // Copy transcript before destroying arena
         char *user_text = strdup(transcript);
         arena_destroy(stt_arena);
 
-        // 4. Run agent
+        // 3. Run agent
         adam_run_result_t r = adam_run(s, h, user_text);
         free(user_text);
+
+        if (g_quit) { adam_run_result_free(&r); break; }
 
         if (r.status != ADAM_OK) {
             printf("    (agent error: %s)\n\n",
@@ -264,8 +241,8 @@ int main(void) {
         printf("    Adam: %s\n", r.final_response ? r.final_response : "...");
         total_cost += r.cost_usd;
 
-        // 5. Speak the response
-        if (r.final_response) {
+        // 4. Speak the response
+        if (r.final_response && !g_quit) {
             adam_tts_speak(s, r.final_response);
         }
 
