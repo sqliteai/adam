@@ -242,7 +242,14 @@ int main(void) {
     printf("  ║  Speak naturally. Press Enter when done.     ║\n");
     printf("  ║  Press Ctrl+C to exit.                       ║\n");
     printf("  ║  Speak any language — replies match yours.   ║\n");
-    printf("  ╚══════════════════════════════════════════════╝\n\n");
+    printf("  ╚══════════════════════════════════════════════╝\n");
+
+    // Warm up: TLS handshake + audio device initialization on a short
+    // silent phrase. This ensures the first real response plays cleanly.
+    printf("\n  Warming up TTS...");
+    fflush(stdout);
+    adam_tts_speak(s, ".");
+    printf(" ready!\n\n");
 
     signal(SIGINT, sigint_handler);
 
