@@ -8,11 +8,10 @@
 #ifndef ADAM_NO_CURL
 
 #include "adam.h"
+#include "adam_json.h"
 #include <curl/curl.h>
 #include <string.h>
 #include <stdio.h>
-
-#define UNUSED_PARAM(p) ((void)(p))
 
 // ============================================================================
 // MARK: - curl write callback
@@ -56,15 +55,6 @@ adam_llm_response_t adam_llm_call_http(
 ) {
     adam_llm_response_t resp = {0};
 
-    // TODO: implement JSON request building (adam_json.c)
-    // TODO: implement JSON response parsing (adam_json.c)
-    // For now, this is a placeholder that proves the curl link works.
-
-    UNUSED_PARAM(msgs);
-    UNUSED_PARAM(msg_count);
-    UNUSED_PARAM(tools);
-    UNUSED_PARAM(tool_count);
-
     CURL *curl = curl_easy_init();
     if (!curl) {
         resp.error = ADAM_ERR_CURL;
@@ -87,9 +77,21 @@ adam_llm_response_t adam_llm_call_http(
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
 
-    // TODO: build the actual request body from msgs/tools via adam_json.c
-    const char *body = "{\"model\":\"test\",\"messages\":[]}";
+    // Build request JSON
+    const char *body = adam_json_build_request(
+        arena, s->api_format, s->model,
+        msgs, msg_count, tools, tool_count,
+        s->temperature, s->max_tokens, s->top_p,
+        s->response_format
+    );
+    if (!body) {
+        resp.error = ADAM_ERR_JSON;
+        resp.error_msg = arena_strdup(arena, "failed to build request JSON");
+        curl_easy_cleanup(curl);
+        return resp;
+    }
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
 
     // Headers
     struct curl_slist *headers = NULL;
@@ -142,13 +144,11 @@ adam_llm_response_t adam_llm_call_http(
             ? arena_strdup(arena, write_ctx.buf)
             : arena_strdup(arena, "HTTP error");
     } else {
-        // TODO: parse response JSON via adam_json.c
-        // For now, return raw body as content
-        resp.content = write_ctx.buf
-            ? arena_strdup(arena, write_ctx.buf)
-            : arena_strdup(arena, "");
-        resp.input_tokens = 0;
-        resp.output_tokens = 0;
+        // Parse response JSON
+        resp = adam_json_parse_response(
+            arena, s->api_format,
+            write_ctx.buf, write_ctx.len
+        );
     }
 
     curl_slist_free_all(headers);

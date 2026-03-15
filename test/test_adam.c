@@ -15,6 +15,7 @@
 //
 
 #include "adam.h"
+#include "adam_json.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1274,6 +1275,341 @@ TEST(voice_custom_tts_callback) {
 #endif // !ADAM_NO_VOICE && !ADAM_NO_PTHREADS
 
 // ============================================================================
+// MARK: - Tests: JSON Build & Parse
+// ============================================================================
+
+TEST(json_build_anthropic_simple) {
+    arena_t *a = arena_create(8192);
+    adam_message_t msgs[2];
+    memset(msgs, 0, sizeof(msgs));
+    msgs[0].role = ADAM_ROLE_SYSTEM;
+    msgs[0].content = "You are helpful.";
+    msgs[0].content_len = strlen(msgs[0].content);
+    msgs[1].role = ADAM_ROLE_USER;
+    msgs[1].content = "Hello";
+    msgs[1].content_len = 5;
+
+    const char *json = adam_json_build_request(
+        a, ADAM_API_ANTHROPIC, "claude-sonnet-4-20250514",
+        msgs, 2, NULL, 0, 0.7f, 4096, 1.0f, NULL);
+
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"model\":\"claude-sonnet-4-20250514\"") != NULL);
+    ASSERT(strstr(json, "\"max_tokens\":4096") != NULL);
+    ASSERT(strstr(json, "\"system\":[{\"type\":\"text\"") != NULL);
+    ASSERT(strstr(json, "You are helpful.") != NULL);
+    ASSERT(strstr(json, "\"messages\":[") != NULL);
+    ASSERT(strstr(json, "\"role\":\"user\"") != NULL);
+    ASSERT(strstr(json, "Hello") != NULL);
+    // System should NOT appear in messages array
+    // (it's outside in Anthropic format)
+
+    arena_destroy(a);
+}
+
+TEST(json_build_openai_simple) {
+    arena_t *a = arena_create(8192);
+    adam_message_t msgs[2];
+    memset(msgs, 0, sizeof(msgs));
+    msgs[0].role = ADAM_ROLE_SYSTEM;
+    msgs[0].content = "You are helpful.";
+    msgs[0].content_len = strlen(msgs[0].content);
+    msgs[1].role = ADAM_ROLE_USER;
+    msgs[1].content = "Hello";
+    msgs[1].content_len = 5;
+
+    const char *json = adam_json_build_request(
+        a, ADAM_API_OPENAI, "gpt-4o",
+        msgs, 2, NULL, 0, 0.7f, 4096, 1.0f, NULL);
+
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"model\":\"gpt-4o\"") != NULL);
+    ASSERT(strstr(json, "\"max_completion_tokens\":4096") != NULL);
+    ASSERT(strstr(json, "\"role\":\"system\"") != NULL);
+    ASSERT(strstr(json, "\"role\":\"user\"") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_build_with_tools) {
+    arena_t *a = arena_create(8192);
+    adam_message_t msg = {
+        .role = ADAM_ROLE_USER, .content = "Search for X", .content_len = 12
+    };
+    adam_tool_def_t tools[] = {{
+        .name = "search",
+        .description = "Search the web",
+        .parameters_json = "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}"
+    }};
+
+    // Anthropic format
+    const char *json = adam_json_build_request(
+        a, ADAM_API_ANTHROPIC, "claude-sonnet-4", &msg, 1, tools, 1,
+        0.7f, 4096, 1.0f, NULL);
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"tools\":[") != NULL);
+    ASSERT(strstr(json, "\"name\":\"search\"") != NULL);
+    ASSERT(strstr(json, "\"input_schema\":") != NULL);
+
+    arena_reset(a);
+
+    // OpenAI format
+    json = adam_json_build_request(
+        a, ADAM_API_OPENAI, "gpt-4o", &msg, 1, tools, 1,
+        0.7f, 4096, 1.0f, NULL);
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"tools\":[") != NULL);
+    ASSERT(strstr(json, "\"type\":\"function\"") != NULL);
+    ASSERT(strstr(json, "\"parameters\":") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_build_tool_call_messages) {
+    // Test building messages that contain tool calls and tool results
+    arena_t *a = arena_create(16384);
+
+    adam_tool_call_entry_t tc_entry = {
+        .id = "call_abc123", .name = "search",
+        .arguments_json = "{\"q\":\"test\"}"
+    };
+
+    adam_message_t msgs[3];
+    memset(msgs, 0, sizeof(msgs));
+
+    msgs[0].role = ADAM_ROLE_USER;
+    msgs[0].content = "Find X"; msgs[0].content_len = 6;
+
+    msgs[1].role = ADAM_ROLE_ASSISTANT;
+    msgs[1].content = "Searching..."; msgs[1].content_len = 12;
+    msgs[1].tool_calls = &tc_entry;
+    msgs[1].tool_call_count = 1;
+
+    msgs[2].role = ADAM_ROLE_TOOL;
+    msgs[2].content = "Found 42 results."; msgs[2].content_len = 17;
+    msgs[2].tool_call_id = "call_abc123";
+
+    // Anthropic
+    const char *json = adam_json_build_request(
+        a, ADAM_API_ANTHROPIC, "claude-sonnet-4", msgs, 3, NULL, 0,
+        0.7f, 4096, 1.0f, NULL);
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"type\":\"tool_use\"") != NULL);
+    ASSERT(strstr(json, "call_abc123") != NULL);
+    ASSERT(strstr(json, "\"type\":\"tool_result\"") != NULL);
+
+    arena_reset(a);
+
+    // OpenAI
+    json = adam_json_build_request(
+        a, ADAM_API_OPENAI, "gpt-4o", msgs, 3, NULL, 0,
+        0.7f, 4096, 1.0f, NULL);
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"tool_calls\":[") != NULL);
+    ASSERT(strstr(json, "\"role\":\"tool\"") != NULL);
+    ASSERT(strstr(json, "call_abc123") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_build_escaping) {
+    arena_t *a = arena_create(8192);
+    adam_message_t msg = {
+        .role = ADAM_ROLE_USER,
+        .content = "He said \"hello\"\nand\ttab\\slash",
+        .content_len = 29
+    };
+
+    const char *json = adam_json_build_request(
+        a, ADAM_API_OPENAI, "gpt-4o", &msg, 1, NULL, 0,
+        0.7f, 4096, 1.0f, NULL);
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\\\"hello\\\"") != NULL);
+    ASSERT(strstr(json, "\\n") != NULL);
+    ASSERT(strstr(json, "\\t") != NULL);
+    ASSERT(strstr(json, "\\\\") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_build_json_mode) {
+    arena_t *a = arena_create(8192);
+    adam_message_t msg = {
+        .role = ADAM_ROLE_USER, .content = "List items", .content_len = 10
+    };
+
+    const char *json = adam_json_build_request(
+        a, ADAM_API_OPENAI, "gpt-4o", &msg, 1, NULL, 0,
+        0.7f, 4096, 1.0f, "json");
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"response_format\":{\"type\":\"json_object\"}") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_anthropic_text) {
+    arena_t *a = arena_create(8192);
+    const char *json =
+        "{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\","
+        "\"content\":[{\"type\":\"text\",\"text\":\"Hello there!\"}],"
+        "\"stop_reason\":\"end_turn\","
+        "\"usage\":{\"input_tokens\":25,\"output_tokens\":10}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_ANTHROPIC, json, strlen(json));
+
+    ASSERT_EQ(r.error, ADAM_OK);
+    ASSERT_NOT_NULL(r.content);
+    ASSERT_STR_EQ(r.content, "Hello there!");
+    ASSERT_EQ(r.tool_call_count, 0);
+    ASSERT_EQ(r.input_tokens, 25);
+    ASSERT_EQ(r.output_tokens, 10);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_anthropic_tool_use) {
+    arena_t *a = arena_create(8192);
+    const char *json =
+        "{\"id\":\"msg_02\",\"type\":\"message\",\"role\":\"assistant\","
+        "\"content\":["
+        "{\"type\":\"text\",\"text\":\"Let me search.\"},"
+        "{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"search\","
+        "\"input\":{\"query\":\"test query\"}}"
+        "],\"stop_reason\":\"tool_use\","
+        "\"usage\":{\"input_tokens\":50,\"output_tokens\":30}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_ANTHROPIC, json, strlen(json));
+
+    ASSERT_EQ(r.error, ADAM_OK);
+    ASSERT_NOT_NULL(r.content);
+    ASSERT_STR_EQ(r.content, "Let me search.");
+    ASSERT_EQ(r.tool_call_count, 1);
+    ASSERT_STR_EQ(r.tool_calls[0].id, "toolu_01");
+    ASSERT_STR_EQ(r.tool_calls[0].name, "search");
+    ASSERT(strstr(r.tool_calls[0].arguments_json, "test query") != NULL);
+    ASSERT_EQ(r.input_tokens, 50);
+    ASSERT_EQ(r.output_tokens, 30);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_anthropic_error) {
+    arena_t *a = arena_create(4096);
+    const char *json =
+        "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
+        "\"message\":\"max_tokens must be positive\"}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_ANTHROPIC, json, strlen(json));
+
+    ASSERT_NE(r.error, ADAM_OK);
+    ASSERT_NOT_NULL(r.error_msg);
+    ASSERT(strstr(r.error_msg, "max_tokens") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_openai_text) {
+    arena_t *a = arena_create(8192);
+    const char *json =
+        "{\"id\":\"chatcmpl-01\",\"object\":\"chat.completion\","
+        "\"choices\":[{\"index\":0,\"message\":"
+        "{\"role\":\"assistant\",\"content\":\"Hello from GPT!\"},"
+        "\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":5}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_OPENAI, json, strlen(json));
+
+    ASSERT_EQ(r.error, ADAM_OK);
+    ASSERT_NOT_NULL(r.content);
+    ASSERT_STR_EQ(r.content, "Hello from GPT!");
+    ASSERT_EQ(r.tool_call_count, 0);
+    ASSERT_EQ(r.input_tokens, 15);
+    ASSERT_EQ(r.output_tokens, 5);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_openai_tool_calls) {
+    arena_t *a = arena_create(8192);
+    const char *json =
+        "{\"choices\":[{\"index\":0,\"message\":"
+        "{\"role\":\"assistant\",\"content\":null,"
+        "\"tool_calls\":[{\"id\":\"call_xyz\",\"type\":\"function\","
+        "\"function\":{\"name\":\"get_weather\","
+        "\"arguments\":\"{\\\"city\\\":\\\"London\\\"}\"}}]},"
+        "\"finish_reason\":\"tool_calls\"}],"
+        "\"usage\":{\"prompt_tokens\":40,\"completion_tokens\":20}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_OPENAI, json, strlen(json));
+
+    ASSERT_EQ(r.error, ADAM_OK);
+    ASSERT_EQ(r.tool_call_count, 1);
+    ASSERT_STR_EQ(r.tool_calls[0].id, "call_xyz");
+    ASSERT_STR_EQ(r.tool_calls[0].name, "get_weather");
+    ASSERT(strstr(r.tool_calls[0].arguments_json, "London") != NULL);
+    ASSERT_EQ(r.input_tokens, 40);
+    ASSERT_EQ(r.output_tokens, 20);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_openai_error) {
+    arena_t *a = arena_create(4096);
+    const char *json =
+        "{\"error\":{\"message\":\"Invalid API key\",\"type\":\"auth_error\"}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_OPENAI, json, strlen(json));
+
+    ASSERT_NE(r.error, ADAM_OK);
+    ASSERT_NOT_NULL(r.error_msg);
+    ASSERT(strstr(r.error_msg, "Invalid API key") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_invalid) {
+    arena_t *a = arena_create(4096);
+
+    // Empty
+    adam_llm_response_t r1 = adam_json_parse_response(a, ADAM_API_OPENAI, NULL, 0);
+    ASSERT_NE(r1.error, ADAM_OK);
+
+    // Malformed
+    adam_llm_response_t r2 = adam_json_parse_response(
+        a, ADAM_API_OPENAI, "{broken", 7);
+    ASSERT_NE(r2.error, ADAM_OK);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_anthropic_multi_tool) {
+    arena_t *a = arena_create(8192);
+    const char *json =
+        "{\"content\":["
+        "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"search\",\"input\":{\"q\":\"a\"}},"
+        "{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"fetch\",\"input\":{\"url\":\"b\"}}"
+        "],\"usage\":{\"input_tokens\":100,\"output_tokens\":50}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_ANTHROPIC, json, strlen(json));
+
+    ASSERT_EQ(r.error, ADAM_OK);
+    ASSERT_EQ(r.tool_call_count, 2);
+    ASSERT_STR_EQ(r.tool_calls[0].name, "search");
+    ASSERT_STR_EQ(r.tool_calls[1].name, "fetch");
+    ASSERT_STR_EQ(r.tool_calls[0].id, "t1");
+    ASSERT_STR_EQ(r.tool_calls[1].id, "t2");
+
+    arena_destroy(a);
+}
+
+// ============================================================================
 // MARK: - Performance Benchmarks
 // ============================================================================
 
@@ -1417,6 +1753,23 @@ int main(void) {
     RUN(thread_pool_basic);
     RUN(thread_pool_empty_destroy);
 #endif
+
+    // --- JSON ---
+    printf("\nJSON Build & Parse:\n");
+    RUN(json_build_anthropic_simple);
+    RUN(json_build_openai_simple);
+    RUN(json_build_with_tools);
+    RUN(json_build_tool_call_messages);
+    RUN(json_build_escaping);
+    RUN(json_build_json_mode);
+    RUN(json_parse_anthropic_text);
+    RUN(json_parse_anthropic_tool_use);
+    RUN(json_parse_anthropic_error);
+    RUN(json_parse_openai_text);
+    RUN(json_parse_openai_tool_calls);
+    RUN(json_parse_openai_error);
+    RUN(json_parse_invalid);
+    RUN(json_parse_anthropic_multi_tool);
 
 #if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
     // --- Voice ---

@@ -39,7 +39,7 @@ endif
 # Sources
 # ============================================================================
 
-SRCS := src/arena.c src/adam.c src/adam_http.c
+SRCS := src/arena.c src/adam.c src/adam_json.c src/adam_http.c
 OBJS := $(SRCS:.c=.o)
 
 # ============================================================================
