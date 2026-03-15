@@ -146,6 +146,8 @@ struct adam_pcm_player_t {
     volatile int    started;     // set once device is running
     int             sample_rate;
     int             channels;
+    uint8_t         leftover_byte; // half of a 16-bit sample from odd-sized chunk
+    int             has_leftover;
 };
 
 #define RING_SAMPLES (PCM_RING_SIZE / sizeof(int16_t))
@@ -208,17 +210,41 @@ adam_pcm_player_t *adam_pcm_player_start(int sample_rate, int channels) {
 void adam_pcm_player_feed(adam_pcm_player_t *p, const uint8_t *pcm_data, size_t len) {
     if (!p || !pcm_data || len == 0) return;
 
-    // pcm_data is raw int16_t samples (little-endian)
-    size_t samples = len / sizeof(int16_t);
-    const int16_t *src = (const int16_t *)pcm_data;
+    const uint8_t *src = pcm_data;
+    size_t remaining = len;
 
-    for (size_t i = 0; i < samples; i++) {
-        // Spin-wait if ring is full (very rare — playback is real-time)
+    // Handle leftover byte from previous chunk (odd-length chunks can
+    // split a 16-bit sample across two curl callbacks)
+    if (p->has_leftover && remaining > 0) {
+        uint8_t pair[2];
+        pair[0] = p->leftover_byte;
+        pair[1] = src[0];
+        int16_t sample;
+        memcpy(&sample, pair, 2); // preserves endianness
         size_t next = (p->write_pos + 1) % RING_SAMPLES;
-        while (next == p->read_pos) {
-            ma_sleep(1);
-        }
-        p->ring[p->write_pos] = src[i];
+        while (next == p->read_pos) ma_sleep(1);
+        p->ring[p->write_pos] = sample;
+        p->write_pos = next;
+        src++;
+        remaining--;
+        p->has_leftover = 0;
+    }
+
+    // Save leftover byte if odd length
+    if (remaining % 2 != 0) {
+        p->leftover_byte = src[remaining - 1];
+        p->has_leftover = 1;
+        remaining--;
+    }
+
+    // Feed complete 16-bit samples
+    size_t samples = remaining / 2;
+    for (size_t i = 0; i < samples; i++) {
+        int16_t sample;
+        memcpy(&sample, src + i * 2, 2); // safe unaligned read
+        size_t next = (p->write_pos + 1) % RING_SAMPLES;
+        while (next == p->read_pos) ma_sleep(1);
+        p->ring[p->write_pos] = sample;
         p->write_pos = next;
     }
 }

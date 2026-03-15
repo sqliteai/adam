@@ -464,8 +464,8 @@ adam_status_t adam_audio_play(adam_settings_t *s,
 // Streaming TTS context: buffers initial data to detect errors,
 // then starts the PCM player and feeds remaining chunks directly.
 typedef struct {
-    adam_pcm_player_t *player;       // NULL until first valid PCM chunk
-    uint8_t            prebuf[4096]; // initial buffer to detect JSON errors
+    adam_pcm_player_t *player;        // NULL until first valid PCM chunk
+    uint8_t            prebuf[12288]; // ~250ms buffer to detect errors + avoid underrun
     size_t             prebuf_len;
     int                is_error;     // set if response looks like JSON error
 } stream_tts_ctx_t;
@@ -494,10 +494,22 @@ static size_t stream_tts_write_cb(char *data, size_t size, size_t nmemb,
             return bytes;
         }
 
-        // Wait for enough data before starting player (~100ms of audio
-        // at 24kHz mono s16 = 4800 bytes). This prevents underrun clicks.
-        if (ctx->prebuf_len < 4800 && bytes == copy) {
+        // Wait for enough data before starting player (~200ms of audio
+        // at 24kHz mono s16 = 9600 bytes). This prevents underrun clicks
+        // and gives the ring buffer a healthy head start.
+        if (ctx->prebuf_len < 9600 && bytes == copy
+            && ctx->prebuf_len < sizeof(ctx->prebuf)) {
             return bytes; // keep buffering
+        }
+
+        // Apply a short fade-in (~2ms = 48 samples at 24kHz) to prevent pop
+        size_t fade_samples = 48;
+        size_t prebuf_samples = ctx->prebuf_len / 2;
+        if (prebuf_samples > fade_samples) {
+            int16_t *samples = (int16_t *)ctx->prebuf;
+            for (size_t i = 0; i < fade_samples; i++) {
+                samples[i] = (int16_t)((int32_t)samples[i] * (int32_t)i / (int32_t)fade_samples);
+            }
         }
 
         // Start the player now
