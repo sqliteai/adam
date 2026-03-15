@@ -90,6 +90,69 @@ static uint8_t *record_speech(size_t *out_len) {
 }
 
 // ============================================================================
+// MARK: - Voice selection
+// ============================================================================
+
+static const char *g_voices[] = {
+    "alloy",    // 0 — Neutral, balanced
+    "ash",      // 1 — Warm, conversational
+    "ballad",   // 2 — Soft, gentle
+    "coral",    // 3 — Clear, friendly
+    "echo",     // 4 — Smooth, authoritative
+    "fable",    // 5 — Expressive, storytelling
+    "nova",     // 6 — Bright, energetic
+    "sage",     // 7 — Calm, measured
+    "shimmer",  // 8 — Light, upbeat
+    "verse",    // 9 — Versatile, dynamic
+};
+static const char *g_voice_desc[] = {
+    "Neutral, balanced",
+    "Warm, conversational",
+    "Soft, gentle",
+    "Clear, friendly",
+    "Smooth, authoritative",
+    "Expressive, storytelling",
+    "Bright, energetic",
+    "Calm, measured",
+    "Light, upbeat",
+    "Versatile, dynamic",
+};
+#define NUM_VOICES 10
+
+static const char *pick_voice(void) {
+    printf("  Available voices:\n");
+    for (int i = 0; i < NUM_VOICES; i++) {
+        printf("    %d. %-10s — %s%s\n", i, g_voices[i], g_voice_desc[i],
+               i == 3 ? " (default)" : "");
+    }
+    printf("\n  Select voice [0-9, name, or Enter for coral]: ");
+    fflush(stdout);
+
+    char buf[64];
+    if (!fgets(buf, sizeof(buf), stdin) || buf[0] == '\n')
+        return "coral";
+
+    // Strip newline
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r'))
+        buf[--len] = '\0';
+
+    // Try as number
+    if (len == 1 && buf[0] >= '0' && buf[0] <= '9') {
+        return g_voices[buf[0] - '0'];
+    }
+
+    // Try as name
+    for (int i = 0; i < NUM_VOICES; i++) {
+        if (strcmp(buf, g_voices[i]) == 0)
+            return g_voices[i];
+    }
+
+    printf("  (unknown voice \"%s\", using coral)\n", buf);
+    return "coral";
+}
+
+// ============================================================================
 // MARK: - Signal handling (Ctrl+C to quit)
 // ============================================================================
 
@@ -161,18 +224,20 @@ int main(void) {
     adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, openai_key,
                           "gpt-4o-mini-transcribe");
 
-    // TTS: OpenAI (gpt-4o-mini-tts is faster than tts-1)
+    // TTS: voice selection
+    printf("\n");
+    const char *voice = pick_voice();
+
     adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, openai_key,
-                          "gpt-4o-mini-tts", "coral");
+                          "gpt-4o-mini-tts", voice);
     s->tts_format = ADAM_AUDIO_MP3;
 
     printf("\n");
     printf("  ╔══════════════════════════════════════════════╗\n");
     printf("  ║       Adam Voice Conversation                ║\n");
     printf("  ╠══════════════════════════════════════════════╣\n");
-    printf("  ║  LLM: %-39s║\n", llm_model);
-    printf("  ║  STT: gpt-4o-mini-transcribe (cloud)           ║\n");
-    printf("  ║  TTS: gpt-4o-mini-tts coral + miniaudio       ║\n");
+    printf("  ║  LLM:   %-38s║\n", llm_model);
+    printf("  ║  Voice: %-38s║\n", voice);
     printf("  ╠══════════════════════════════════════════════╣\n");
     printf("  ║  Speak naturally. Press Enter when done.     ║\n");
     printf("  ║  Press Ctrl+C to exit.                       ║\n");
