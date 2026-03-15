@@ -50,10 +50,12 @@ static const char *g_status_strings[] = {
     [ADAM_ERR_TOOL_NOT_FOUND]   = "tool not found",
     [ADAM_ERR_INVALID_PARAM]    = "invalid parameter",
     [ADAM_ERR_NO_PROVIDER]      = "no provider configured",
+    [ADAM_ERR_VOICE]            = "voice error",
+    [ADAM_ERR_NOT_IMPLEMENTED]  = "not yet implemented",
 };
 
 const char *adam_status_string(adam_status_t status) {
-    if (status < 0 || status > ADAM_ERR_NO_PROVIDER) return "unknown error";
+    if (status < 0 || status > ADAM_ERR_NOT_IMPLEMENTED) return "unknown error";
     return g_status_strings[status];
 }
 
@@ -125,6 +127,20 @@ adam_settings_t *adam_create_settings(void) {
 
     // Memory default context
     s->memory_context       = "default";
+
+    // Voice defaults
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+    s->voice_enabled        = 0;
+    s->stt_backend          = ADAM_STT_NONE;
+    s->stt_model            = "whisper-1";
+    s->stt_sample_rate      = 16000;
+    s->tts_backend          = ADAM_TTS_NONE;
+    s->tts_model            = "tts-1";
+    s->tts_voice            = "alloy";
+    s->tts_format           = ADAM_AUDIO_MP3;
+    s->voice_silence_sec    = 1.0f;
+    s->voice_energy_threshold = 0.02f;
+#endif
 
     return s;
 }
@@ -266,6 +282,147 @@ adam_status_t adam_settings_set_http_callback(adam_settings_t *s,
     s->http_ctx = ctx;
     return ADAM_OK;
 }
+
+// ============================================================================
+// MARK: - Voice Settings & Stubs
+// ============================================================================
+
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+
+adam_status_t adam_settings_set_stt(adam_settings_t *s,
+                                    adam_stt_backend_t backend,
+                                    const char *api_url,
+                                    const char *api_key,
+                                    const char *model) {
+    if (!s) return ADAM_ERR_INVALID_PARAM;
+    s->voice_enabled = 1;
+    s->stt_backend = backend;
+    if (api_url) s->stt_api_url = api_url;
+    if (api_key) s->stt_api_key = api_key;
+    if (model)   s->stt_model = model;
+    return ADAM_OK;
+}
+
+adam_status_t adam_settings_set_tts(adam_settings_t *s,
+                                    adam_tts_backend_t backend,
+                                    const char *api_url,
+                                    const char *api_key,
+                                    const char *model,
+                                    const char *voice) {
+    if (!s) return ADAM_ERR_INVALID_PARAM;
+    s->tts_backend = backend;
+    if (api_url) s->tts_api_url = api_url;
+    if (api_key) s->tts_api_key = api_key;
+    if (model)   s->tts_model = model;
+    if (voice)   s->tts_voice = voice;
+    return ADAM_OK;
+}
+
+adam_status_t adam_settings_set_stt_callback(adam_settings_t *s,
+                                             adam_stt_fn fn, void *ctx) {
+    if (!s) return ADAM_ERR_INVALID_PARAM;
+    s->stt_fn = fn;
+    s->stt_ctx = ctx;
+    return ADAM_OK;
+}
+
+adam_status_t adam_settings_set_tts_callback(adam_settings_t *s,
+                                             adam_tts_fn fn, void *ctx) {
+    if (!s) return ADAM_ERR_INVALID_PARAM;
+    s->tts_fn = fn;
+    s->tts_ctx = ctx;
+    return ADAM_OK;
+}
+
+adam_status_t adam_settings_set_voice_callback(adam_settings_t *s,
+                                               adam_voice_event_fn fn,
+                                               void *ctx) {
+    if (!s) return ADAM_ERR_INVALID_PARAM;
+    s->on_voice = fn;
+    s->voice_ctx = ctx;
+    return ADAM_OK;
+}
+
+// --- Voice runtime stubs ---
+
+adam_status_t adam_voice_start(adam_settings_t *s, adam_history_t *h) {
+    UNUSED_PARAM(h);
+    if (!s) return ADAM_ERR_INVALID_PARAM;
+    if (!s->voice_enabled) return ADAM_ERR_INVALID_PARAM;
+    if (s->stt_backend == ADAM_STT_NONE) return ADAM_ERR_INVALID_PARAM;
+    // TODO: implement voice thread (adam_voice.c)
+    ADAM_LOG(s, ADAM_LOG_WARN, "adam_voice_start: not yet implemented");
+    return ADAM_ERR_NOT_IMPLEMENTED;
+}
+
+void adam_voice_stop(adam_settings_t *s) {
+    if (!s) return;
+    // TODO: implement voice thread stop
+}
+
+int adam_voice_is_running(const adam_settings_t *s) {
+    if (!s) return 0;
+    return (s->_voice != NULL);
+}
+
+adam_status_t adam_stt_transcribe(adam_settings_t *s, arena_t *arena,
+                                  const uint8_t *audio, size_t audio_len,
+                                  adam_audio_format_t format,
+                                  const char **out_text) {
+    if (!s || !arena || !audio || !out_text) return ADAM_ERR_INVALID_PARAM;
+
+    // Custom callback takes priority
+    if (s->stt_fn) {
+        return s->stt_fn(s->stt_ctx, arena, audio, audio_len,
+                          format, s->stt_sample_rate, s->stt_language,
+                          out_text);
+    }
+
+    switch (s->stt_backend) {
+    case ADAM_STT_CLOUD:
+        // TODO: implement cloud STT via libcurl (adam_voice.c)
+        ADAM_LOG(s, ADAM_LOG_WARN, "cloud STT: not yet implemented");
+        return ADAM_ERR_NOT_IMPLEMENTED;
+
+    case ADAM_STT_LOCAL:
+        ADAM_LOG(s, ADAM_LOG_WARN, "local STT: not yet implemented");
+        return ADAM_ERR_NOT_IMPLEMENTED;
+
+    case ADAM_STT_NONE:
+    default:
+        return ADAM_ERR_INVALID_PARAM;
+    }
+}
+
+adam_status_t adam_tts_synthesize(adam_settings_t *s, arena_t *arena,
+                                  const char *text,
+                                  uint8_t **out_audio, size_t *out_len) {
+    if (!s || !arena || !text || !out_audio || !out_len)
+        return ADAM_ERR_INVALID_PARAM;
+
+    // Custom callback takes priority
+    if (s->tts_fn) {
+        return s->tts_fn(s->tts_ctx, arena, text, s->tts_voice,
+                          s->tts_format, out_audio, out_len);
+    }
+
+    switch (s->tts_backend) {
+    case ADAM_TTS_CLOUD:
+        // TODO: implement cloud TTS via libcurl (adam_voice.c)
+        ADAM_LOG(s, ADAM_LOG_WARN, "cloud TTS: not yet implemented");
+        return ADAM_ERR_NOT_IMPLEMENTED;
+
+    case ADAM_TTS_LOCAL:
+        ADAM_LOG(s, ADAM_LOG_WARN, "local TTS: not yet implemented");
+        return ADAM_ERR_NOT_IMPLEMENTED;
+
+    case ADAM_TTS_NONE:
+    default:
+        return ADAM_ERR_INVALID_PARAM;
+    }
+}
+
+#endif // !ADAM_NO_VOICE && !ADAM_NO_PTHREADS
 
 // ============================================================================
 // MARK: - Cancellation

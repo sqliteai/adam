@@ -31,8 +31,9 @@ extern "C" {
 // Define these before including adam.h to disable features:
 //   ADAM_NO_CURL       — no libcurl (no HTTP, must provide http_fn callback)
 //   ADAM_NO_LOCAL      — no llama.cpp (no local GGUF inference)
-//   ADAM_NO_PTHREADS   — no pthreads (no thread pool, single-threaded only)
+//   ADAM_NO_PTHREADS   — no pthreads (no thread pool, no voice thread)
 //   ADAM_NO_SQLITE     — no SQLite (no memory, no sessions)
+//   ADAM_NO_VOICE      — no voice subsystem
 
 // ============================================================================
 // MARK: - Forward Declarations
@@ -43,6 +44,7 @@ typedef struct adam_agent_t      adam_agent_t;
 typedef struct adam_pool_t       adam_pool_t;
 typedef struct adam_memory_t     adam_memory_t;
 typedef struct adam_session_t    adam_session_t;
+typedef struct adam_voice_t      adam_voice_t;
 
 // ============================================================================
 // MARK: - Status Codes
@@ -64,6 +66,8 @@ typedef enum {
     ADAM_ERR_TOOL_NOT_FOUND      = 12,  // tool name not in registry
     ADAM_ERR_INVALID_PARAM       = 13,  // invalid parameter passed to API
     ADAM_ERR_NO_PROVIDER         = 14,  // no provider configured
+    ADAM_ERR_VOICE               = 15,  // voice subsystem error (STT/TTS)
+    ADAM_ERR_NOT_IMPLEMENTED     = 16,  // feature stub (not yet implemented)
 } adam_status_t;
 
 const char *adam_status_string(adam_status_t status);
@@ -211,6 +215,73 @@ typedef struct {
 // - is_done: 1 on the final chunk, 0 otherwise
 typedef void (*adam_stream_fn)(void *ctx, const char *chunk, size_t len,
                                int is_done);
+
+// ============================================================================
+// MARK: - Voice (STT / TTS)
+// ============================================================================
+
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+
+// --- STT/TTS backend selection ---
+
+typedef enum {
+    ADAM_STT_NONE               = 0,   // disabled
+    ADAM_STT_CLOUD              = 1,   // cloud API via libcurl (OpenAI Whisper, etc.)
+    ADAM_STT_LOCAL              = 2,   // local engine (not yet implemented)
+} adam_stt_backend_t;
+
+typedef enum {
+    ADAM_TTS_NONE               = 0,   // disabled
+    ADAM_TTS_CLOUD              = 1,   // cloud API via libcurl (OpenAI TTS, ElevenLabs, etc.)
+    ADAM_TTS_LOCAL              = 2,   // local engine (not yet implemented)
+} adam_tts_backend_t;
+
+// --- Audio format ---
+
+typedef enum {
+    ADAM_AUDIO_PCM16            = 0,   // raw PCM 16-bit signed, little-endian
+    ADAM_AUDIO_WAV              = 1,   // WAV container
+    ADAM_AUDIO_MP3              = 2,   // MP3
+    ADAM_AUDIO_OGG_OPUS         = 3,   // OGG/Opus
+    ADAM_AUDIO_FLAC             = 4,   // FLAC
+} adam_audio_format_t;
+
+// --- STT callback (custom backend) ---
+// Transcribe audio to text. All output strings must be arena-allocated.
+typedef adam_status_t (*adam_stt_fn)(
+    void                *ctx,
+    arena_t             *arena,
+    const uint8_t       *audio_data,
+    size_t               audio_len,
+    adam_audio_format_t  format,
+    int                  sample_rate,       // e.g. 16000
+    const char          *language,          // e.g. "en" or NULL for auto
+    const char         **out_text           // arena-owned result
+);
+
+// --- TTS callback (custom backend) ---
+// Synthesize text to audio. Output buffer must be arena-allocated.
+typedef adam_status_t (*adam_tts_fn)(
+    void                *ctx,
+    arena_t             *arena,
+    const char          *text,
+    const char          *voice,             // voice ID or name
+    adam_audio_format_t  out_format,         // desired output format
+    uint8_t            **out_audio,          // arena-owned result
+    size_t              *out_len
+);
+
+// --- Voice event callback ---
+// Called from the voice thread when a voice command is transcribed.
+// The transcribed text is then fed into the main agent loop.
+// Return 0 to accept the command, non-zero to discard it.
+typedef int (*adam_voice_event_fn)(
+    void                *ctx,
+    const char          *transcribed_text,   // what the user said
+    float                confidence          // 0.0 - 1.0
+);
+
+#endif // !ADAM_NO_VOICE && !ADAM_NO_PTHREADS
 
 // ============================================================================
 // MARK: - LLM Response (internal, arena-owned)
@@ -383,6 +454,40 @@ struct adam_settings_t {
     adam_session_t      *sessions;           // default: NULL (disabled)
     const char          *memory_context;     // default: "default"
 
+    // --- Voice (STT / TTS) ---
+
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+    int                  voice_enabled;      // default: 0 (1 = start voice thread)
+
+    // STT settings
+    adam_stt_backend_t   stt_backend;        // default: ADAM_STT_NONE
+    const char          *stt_api_url;        // default: NULL (uses provider default)
+    const char          *stt_api_key;        // default: NULL (falls back to api_key)
+    const char          *stt_model;          // default: "whisper-1"
+    const char          *stt_language;       // default: NULL (auto-detect)
+    int                  stt_sample_rate;    // default: 16000
+    adam_stt_fn          stt_fn;             // default: NULL (use built-in cloud/local)
+    void                *stt_ctx;            // default: NULL
+
+    // TTS settings
+    adam_tts_backend_t   tts_backend;        // default: ADAM_TTS_NONE
+    const char          *tts_api_url;        // default: NULL (uses provider default)
+    const char          *tts_api_key;        // default: NULL (falls back to api_key)
+    const char          *tts_model;          // default: "tts-1"
+    const char          *tts_voice;          // default: "alloy"
+    adam_audio_format_t  tts_format;         // default: ADAM_AUDIO_MP3
+    adam_tts_fn          tts_fn;             // default: NULL (use built-in cloud/local)
+    void                *tts_ctx;            // default: NULL
+
+    // Voice event callback (called when speech is transcribed)
+    adam_voice_event_fn  on_voice;           // default: NULL (accept all)
+    void                *voice_ctx;          // default: NULL
+
+    // Silence detection
+    float                voice_silence_sec;  // default: 1.0 (seconds of silence to trigger STT)
+    float                voice_energy_threshold; // default: 0.02 (energy level to detect speech)
+#endif
+
     // --- Cancellation ---
 
     volatile int         abort_flag;         // set to 1 from any thread to stop
@@ -403,6 +508,9 @@ struct adam_settings_t {
     int                  _rate_req_count;    // requests in current window
     int                  _rate_tok_count;    // tokens in current window
     int64_t              _rate_window_start; // timestamp of window start (ms)
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+    adam_voice_t        *_voice;             // voice thread state
+#endif
 };
 
 // ============================================================================
@@ -467,6 +575,33 @@ adam_status_t   adam_settings_set_llm_callback(adam_settings_t *s,
 
 adam_status_t   adam_settings_set_http_callback(adam_settings_t *s,
                     adam_http_fn fn, void *ctx);
+
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+// Enable voice and configure STT backend.
+adam_status_t   adam_settings_set_stt(adam_settings_t *s,
+                    adam_stt_backend_t backend,
+                    const char *api_url,       // NULL = provider default
+                    const char *api_key,       // NULL = falls back to s->api_key
+                    const char *model);        // NULL = "whisper-1"
+
+// Enable voice and configure TTS backend.
+adam_status_t   adam_settings_set_tts(adam_settings_t *s,
+                    adam_tts_backend_t backend,
+                    const char *api_url,       // NULL = provider default
+                    const char *api_key,       // NULL = falls back to s->api_key
+                    const char *model,         // NULL = "tts-1"
+                    const char *voice);        // NULL = "alloy"
+
+// Custom STT/TTS backends (override built-in cloud/local).
+adam_status_t   adam_settings_set_stt_callback(adam_settings_t *s,
+                    adam_stt_fn fn, void *ctx);
+adam_status_t   adam_settings_set_tts_callback(adam_settings_t *s,
+                    adam_tts_fn fn, void *ctx);
+
+// Voice event filter (called when speech is transcribed).
+adam_status_t   adam_settings_set_voice_callback(adam_settings_t *s,
+                    adam_voice_event_fn fn, void *ctx);
+#endif
 
 // ============================================================================
 // MARK: - History
@@ -562,6 +697,42 @@ int             adam_pool_pending(const adam_pool_t *pool);
 int             adam_pool_active(const adam_pool_t *pool);
 
 #endif // ADAM_NO_PTHREADS
+
+// ============================================================================
+// MARK: - Voice Runtime
+// ============================================================================
+
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+
+// Start the voice thread. Listens for audio input, transcribes via STT,
+// and feeds commands into the agent loop. The agent's on_response text
+// is automatically sent to TTS if tts_backend is configured.
+//
+// Requires voice_enabled=1 and at least stt_backend set in settings.
+// The voice thread runs until adam_voice_stop() is called.
+adam_status_t   adam_voice_start(adam_settings_t *s, adam_history_t *h);
+
+// Stop the voice thread and wait for it to finish.
+void            adam_voice_stop(adam_settings_t *s);
+
+// Check if the voice thread is currently running.
+int             adam_voice_is_running(const adam_settings_t *s);
+
+// One-shot STT: transcribe audio data to text.
+// Useful for processing pre-recorded audio without the voice thread.
+// Result is arena-allocated.
+adam_status_t   adam_stt_transcribe(adam_settings_t *s, arena_t *arena,
+                    const uint8_t *audio, size_t audio_len,
+                    adam_audio_format_t format,
+                    const char **out_text);
+
+// One-shot TTS: synthesize text to audio.
+// Result is arena-allocated.
+adam_status_t   adam_tts_synthesize(adam_settings_t *s, arena_t *arena,
+                    const char *text,
+                    uint8_t **out_audio, size_t *out_len);
+
+#endif // !ADAM_NO_VOICE && !ADAM_NO_PTHREADS
 
 // ============================================================================
 // MARK: - Memory System (SQLite + sqlite-memory + sqlite-vector)

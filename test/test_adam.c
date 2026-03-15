@@ -21,6 +21,8 @@
 #include <time.h>
 #include <assert.h>
 
+#define UNUSED_PARAM(p) ((void)(p))
+
 #ifndef ADAM_NO_PTHREADS
 #include <pthread.h>
 #endif
@@ -1050,6 +1052,228 @@ TEST(thread_pool_empty_destroy) {
 #endif // ADAM_NO_PTHREADS
 
 // ============================================================================
+// MARK: - Tests: Voice
+// ============================================================================
+
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+
+TEST(voice_settings_defaults) {
+    adam_settings_t *s = adam_create_settings();
+    ASSERT_EQ(s->voice_enabled, 0);
+    ASSERT_EQ(s->stt_backend, ADAM_STT_NONE);
+    ASSERT_EQ(s->tts_backend, ADAM_TTS_NONE);
+    ASSERT_STR_EQ(s->stt_model, "whisper-1");
+    ASSERT_EQ(s->stt_sample_rate, 16000);
+    ASSERT_STR_EQ(s->tts_model, "tts-1");
+    ASSERT_STR_EQ(s->tts_voice, "alloy");
+    ASSERT_EQ(s->tts_format, ADAM_AUDIO_MP3);
+    ASSERT(s->voice_silence_sec > 0.9f && s->voice_silence_sec < 1.1f);
+    ASSERT_NULL(s->stt_fn);
+    ASSERT_NULL(s->tts_fn);
+    ASSERT_NULL(s->on_voice);
+    adam_settings_destroy(s);
+}
+
+TEST(voice_settings_set_stt) {
+    adam_settings_t *s = adam_create_settings();
+
+    adam_status_t rc = adam_settings_set_stt(s, ADAM_STT_CLOUD,
+        "https://api.openai.com/v1/audio/transcriptions",
+        "sk-test", "whisper-1");
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_EQ(s->voice_enabled, 1);
+    ASSERT_EQ(s->stt_backend, ADAM_STT_CLOUD);
+    ASSERT_STR_EQ(s->stt_api_url,
+                   "https://api.openai.com/v1/audio/transcriptions");
+    ASSERT_STR_EQ(s->stt_api_key, "sk-test");
+    ASSERT_STR_EQ(s->stt_model, "whisper-1");
+
+    // NULL params should keep defaults
+    adam_settings_t *s2 = adam_create_settings();
+    rc = adam_settings_set_stt(s2, ADAM_STT_CLOUD, NULL, NULL, NULL);
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_NULL(s2->stt_api_url);
+    ASSERT_STR_EQ(s2->stt_model, "whisper-1"); // kept default
+
+    adam_settings_destroy(s);
+    adam_settings_destroy(s2);
+}
+
+TEST(voice_settings_set_tts) {
+    adam_settings_t *s = adam_create_settings();
+
+    adam_status_t rc = adam_settings_set_tts(s, ADAM_TTS_CLOUD,
+        "https://api.openai.com/v1/audio/speech",
+        "sk-test", "tts-1-hd", "nova");
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_EQ(s->tts_backend, ADAM_TTS_CLOUD);
+    ASSERT_STR_EQ(s->tts_voice, "nova");
+    ASSERT_STR_EQ(s->tts_model, "tts-1-hd");
+
+    adam_settings_destroy(s);
+}
+
+TEST(voice_start_not_implemented) {
+    adam_settings_t *s = adam_create_settings();
+    adam_history_t *h = adam_history_create();
+
+    // Not enabled — should fail
+    ASSERT_EQ(adam_voice_start(s, h), ADAM_ERR_INVALID_PARAM);
+
+    // Enable but no backend — should fail
+    s->voice_enabled = 1;
+    ASSERT_EQ(adam_voice_start(s, h), ADAM_ERR_INVALID_PARAM);
+
+    // Enable with cloud STT — returns not implemented (stub)
+    adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, "key", NULL);
+    ASSERT_EQ(adam_voice_start(s, h), ADAM_ERR_NOT_IMPLEMENTED);
+
+    ASSERT_EQ(adam_voice_is_running(s), 0);
+
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(voice_stt_local_not_implemented) {
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, NULL);
+
+    arena_t *a = arena_create(4096);
+    const char *text = NULL;
+    uint8_t audio[] = {0, 1, 2, 3};
+
+    adam_status_t rc = adam_stt_transcribe(s, a, audio, sizeof(audio),
+                                           ADAM_AUDIO_WAV, &text);
+    ASSERT_EQ(rc, ADAM_ERR_NOT_IMPLEMENTED);
+    ASSERT_NULL(text);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(voice_tts_local_not_implemented) {
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_tts(s, ADAM_TTS_LOCAL, NULL, NULL, NULL, NULL);
+
+    arena_t *a = arena_create(4096);
+    uint8_t *audio = NULL;
+    size_t len = 0;
+
+    adam_status_t rc = adam_tts_synthesize(s, a, "Hello world",
+                                           &audio, &len);
+    ASSERT_EQ(rc, ADAM_ERR_NOT_IMPLEMENTED);
+    ASSERT_NULL(audio);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(voice_stt_cloud_not_implemented) {
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, "key", NULL);
+
+    arena_t *a = arena_create(4096);
+    const char *text = NULL;
+    uint8_t audio[] = {0, 1, 2, 3};
+
+    adam_status_t rc = adam_stt_transcribe(s, a, audio, sizeof(audio),
+                                           ADAM_AUDIO_WAV, &text);
+    ASSERT_EQ(rc, ADAM_ERR_NOT_IMPLEMENTED);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(voice_tts_cloud_not_implemented) {
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, "key", NULL, NULL);
+
+    arena_t *a = arena_create(4096);
+    uint8_t *audio = NULL;
+    size_t len = 0;
+
+    adam_status_t rc = adam_tts_synthesize(s, a, "Hello world",
+                                           &audio, &len);
+    ASSERT_EQ(rc, ADAM_ERR_NOT_IMPLEMENTED);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+// Mock STT callback: always transcribes to "hello world"
+static adam_status_t mock_stt(void *ctx, arena_t *arena,
+                               const uint8_t *audio, size_t audio_len,
+                               adam_audio_format_t format, int sample_rate,
+                               const char *language, const char **out_text) {
+    UNUSED_PARAM(audio); UNUSED_PARAM(audio_len);
+    UNUSED_PARAM(format); UNUSED_PARAM(sample_rate);
+    UNUSED_PARAM(language);
+    int *call_count = (int *)ctx;
+    (*call_count)++;
+    *out_text = arena_strdup(arena, "hello world");
+    return ADAM_OK;
+}
+
+// Mock TTS callback: returns 4 bytes of fake audio
+static adam_status_t mock_tts(void *ctx, arena_t *arena,
+                               const char *text, const char *voice,
+                               adam_audio_format_t out_format,
+                               uint8_t **out_audio, size_t *out_len) {
+    UNUSED_PARAM(text); UNUSED_PARAM(voice); UNUSED_PARAM(out_format);
+    int *call_count = (int *)ctx;
+    (*call_count)++;
+    *out_len = 4;
+    *out_audio = arena_alloc(arena, 4);
+    memset(*out_audio, 0xAB, 4);
+    return ADAM_OK;
+}
+
+TEST(voice_custom_stt_callback) {
+    int stt_calls = 0;
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, NULL, NULL);
+    adam_settings_set_stt_callback(s, mock_stt, &stt_calls);
+
+    arena_t *a = arena_create(4096);
+    const char *text = NULL;
+    uint8_t audio[] = {0, 1, 2, 3};
+
+    adam_status_t rc = adam_stt_transcribe(s, a, audio, sizeof(audio),
+                                           ADAM_AUDIO_WAV, &text);
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_NOT_NULL(text);
+    ASSERT_STR_EQ(text, "hello world");
+    ASSERT_EQ(stt_calls, 1);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(voice_custom_tts_callback) {
+    int tts_calls = 0;
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, NULL, NULL, NULL);
+    adam_settings_set_tts_callback(s, mock_tts, &tts_calls);
+
+    arena_t *a = arena_create(4096);
+    uint8_t *audio = NULL;
+    size_t len = 0;
+
+    adam_status_t rc = adam_tts_synthesize(s, a, "Say something",
+                                           &audio, &len);
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_NOT_NULL(audio);
+    ASSERT_EQ(len, 4);
+    ASSERT_EQ(audio[0], 0xAB);
+    ASSERT_EQ(tts_calls, 1);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+#endif // !ADAM_NO_VOICE && !ADAM_NO_PTHREADS
+
+// ============================================================================
 // MARK: - Performance Benchmarks
 // ============================================================================
 
@@ -1192,6 +1416,21 @@ int main(void) {
     printf("\nThread Pool:\n");
     RUN(thread_pool_basic);
     RUN(thread_pool_empty_destroy);
+#endif
+
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+    // --- Voice ---
+    printf("\nVoice:\n");
+    RUN(voice_settings_defaults);
+    RUN(voice_settings_set_stt);
+    RUN(voice_settings_set_tts);
+    RUN(voice_start_not_implemented);
+    RUN(voice_stt_local_not_implemented);
+    RUN(voice_tts_local_not_implemented);
+    RUN(voice_stt_cloud_not_implemented);
+    RUN(voice_tts_cloud_not_implemented);
+    RUN(voice_custom_stt_callback);
+    RUN(voice_custom_tts_callback);
 #endif
 
     // --- Performance ---
