@@ -1063,10 +1063,10 @@ TEST(voice_settings_defaults) {
     ASSERT_EQ(s->voice_enabled, 0);
     ASSERT_EQ(s->stt_backend, ADAM_STT_NONE);
     ASSERT_EQ(s->tts_backend, ADAM_TTS_NONE);
-    ASSERT_STR_EQ(s->stt_model, "whisper-1");
+    ASSERT_STR_EQ(s->stt_model, "gpt-4o-mini-transcribe");
     ASSERT_EQ(s->stt_sample_rate, 16000);
-    ASSERT_STR_EQ(s->tts_model, "tts-1");
-    ASSERT_STR_EQ(s->tts_voice, "alloy");
+    ASSERT_STR_EQ(s->tts_model, "gpt-4o-mini-tts");
+    ASSERT_STR_EQ(s->tts_voice, "coral");
     ASSERT_EQ(s->tts_format, ADAM_AUDIO_MP3);
     ASSERT(s->voice_silence_sec > 0.9f && s->voice_silence_sec < 1.1f);
     ASSERT_NULL(s->stt_fn);
@@ -1080,21 +1080,21 @@ TEST(voice_settings_set_stt) {
 
     adam_status_t rc = adam_settings_set_stt(s, ADAM_STT_CLOUD,
         "https://api.openai.com/v1/audio/transcriptions",
-        "sk-test", "whisper-1");
+        "sk-test", "gpt-4o-mini-transcribe");
     ASSERT_EQ(rc, ADAM_OK);
     ASSERT_EQ(s->voice_enabled, 1);
     ASSERT_EQ(s->stt_backend, ADAM_STT_CLOUD);
     ASSERT_STR_EQ(s->stt_api_url,
                    "https://api.openai.com/v1/audio/transcriptions");
     ASSERT_STR_EQ(s->stt_api_key, "sk-test");
-    ASSERT_STR_EQ(s->stt_model, "whisper-1");
+    ASSERT_STR_EQ(s->stt_model, "gpt-4o-mini-transcribe");
 
     // NULL params should keep defaults
     adam_settings_t *s2 = adam_create_settings();
     rc = adam_settings_set_stt(s2, ADAM_STT_CLOUD, NULL, NULL, NULL);
     ASSERT_EQ(rc, ADAM_OK);
     ASSERT_NULL(s2->stt_api_url);
-    ASSERT_STR_EQ(s2->stt_model, "whisper-1"); // kept default
+    ASSERT_STR_EQ(s2->stt_model, "gpt-4o-mini-transcribe"); // kept default
 
     adam_settings_destroy(s);
     adam_settings_destroy(s2);

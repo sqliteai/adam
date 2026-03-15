@@ -15,6 +15,10 @@
 #include <pthread.h>
 #endif
 
+#ifndef ADAM_NO_CURL
+#include <curl/curl.h>
+#endif
+
 // ============================================================================
 // MARK: - Internal: Logging Helper
 // ============================================================================
@@ -132,11 +136,11 @@ adam_settings_t *adam_create_settings(void) {
 #if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
     s->voice_enabled        = 0;
     s->stt_backend          = ADAM_STT_NONE;
-    s->stt_model            = "whisper-1";
+    s->stt_model            = "gpt-4o-mini-transcribe";
     s->stt_sample_rate      = 16000;
     s->tts_backend          = ADAM_TTS_NONE;
-    s->tts_model            = "tts-1";
-    s->tts_voice            = "alloy";
+    s->tts_model            = "gpt-4o-mini-tts";
+    s->tts_voice            = "coral";
     s->tts_format           = ADAM_AUDIO_MP3;
     s->voice_silence_sec    = 1.0f;
     s->voice_energy_threshold = 0.02f;
@@ -147,9 +151,13 @@ adam_settings_t *adam_create_settings(void) {
 
 void adam_settings_destroy(adam_settings_t *s) {
     if (!s) return;
-    // Free the tools array (tool names/descriptions are const, not owned)
+#ifndef ADAM_NO_CURL
+    // Clean up persistent CURL handles
+    if (s->_curl_llm) { curl_easy_cleanup(s->_curl_llm); s->_curl_llm = NULL; }
+    if (s->_curl_stt) { curl_easy_cleanup(s->_curl_stt); s->_curl_stt = NULL; }
+    if (s->_curl_tts) { curl_easy_cleanup(s->_curl_tts); s->_curl_tts = NULL; }
+#endif
     free(s->tools);
-    // Free bootstrap_files array (the strings are const, not owned)
     free(s->bootstrap_files);
     free(s);
 }

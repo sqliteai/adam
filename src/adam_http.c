@@ -55,12 +55,17 @@ adam_llm_response_t adam_llm_call_http(
 ) {
     adam_llm_response_t resp = {0};
 
-    CURL *curl = curl_easy_init();
+    // Reuse persistent CURL handle (avoids TLS handshake on each call)
+    if (!s->_curl_llm) {
+        s->_curl_llm = curl_easy_init();
+    }
+    CURL *curl = (CURL *)s->_curl_llm;
     if (!curl) {
         resp.error = ADAM_ERR_CURL;
         resp.error_msg = arena_strdup(arena, "curl_easy_init failed");
         return resp;
     }
+    curl_easy_reset(curl);
 
     // Determine URL
     const char *url = s->base_url;
@@ -87,7 +92,6 @@ adam_llm_response_t adam_llm_call_http(
     if (!body) {
         resp.error = ADAM_ERR_JSON;
         resp.error_msg = arena_strdup(arena, "failed to build request JSON");
-        curl_easy_cleanup(curl);
         return resp;
     }
     // Use COPYPOSTFIELDS so curl owns a copy of the body.
@@ -127,7 +131,6 @@ adam_llm_response_t adam_llm_call_http(
         resp.error = ADAM_ERR_CURL;
         resp.error_msg = arena_strdup(arena, curl_easy_strerror(res));
         curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
         return resp;
     }
 
@@ -166,7 +169,6 @@ adam_llm_response_t adam_llm_call_http(
     }
 
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
     return resp;
 }
 

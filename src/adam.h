@@ -474,7 +474,7 @@ struct adam_settings_t {
     adam_stt_backend_t   stt_backend;        // default: ADAM_STT_NONE
     const char          *stt_api_url;        // default: NULL (uses provider default)
     const char          *stt_api_key;        // default: NULL (falls back to api_key)
-    const char          *stt_model;          // default: "whisper-1"
+    const char          *stt_model;          // default: "gpt-4o-mini-transcribe"
     const char          *stt_language;       // default: NULL (auto-detect)
     int                  stt_sample_rate;    // default: 16000
     adam_stt_fn          stt_fn;             // default: NULL (use built-in cloud/local)
@@ -484,8 +484,8 @@ struct adam_settings_t {
     adam_tts_backend_t   tts_backend;        // default: ADAM_TTS_NONE
     const char          *tts_api_url;        // default: NULL (uses provider default)
     const char          *tts_api_key;        // default: NULL (falls back to api_key)
-    const char          *tts_model;          // default: "tts-1"
-    const char          *tts_voice;          // default: "alloy"
+    const char          *tts_model;          // default: "gpt-4o-mini-tts"
+    const char          *tts_voice;          // default: "coral"
     adam_audio_format_t  tts_format;         // default: ADAM_AUDIO_MP3
     adam_tts_fn          tts_fn;             // default: NULL (use built-in cloud/local)
     void                *tts_ctx;            // default: NULL
@@ -523,6 +523,9 @@ struct adam_settings_t {
     int                  _rate_req_count;    // requests in current window
     int                  _rate_tok_count;    // tokens in current window
     int64_t              _rate_window_start; // timestamp of window start (ms)
+    void                *_curl_llm;          // persistent CURL* for LLM calls
+    void                *_curl_stt;          // persistent CURL* for STT calls
+    void                *_curl_tts;          // persistent CURL* for TTS calls
 #if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
     adam_voice_t        *_voice;             // voice thread state
 #endif

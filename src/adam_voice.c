@@ -71,18 +71,18 @@ static adam_status_t cloud_stt(
     adam_audio_format_t format,
     const char **out_text
 ) {
-    CURL *curl = curl_easy_init();
+    // Reuse persistent CURL handle
+    if (!s->_curl_stt) s->_curl_stt = curl_easy_init();
+    CURL *curl = (CURL *)s->_curl_stt;
     if (!curl) return ADAM_ERR_CURL;
+    curl_easy_reset(curl);
 
     const char *url = s->stt_api_url
         ? s->stt_api_url
         : "https://api.openai.com/v1/audio/transcriptions";
 
     const char *key = s->stt_api_key ? s->stt_api_key : s->api_key;
-    if (!key) {
-        curl_easy_cleanup(curl);
-        return ADAM_ERR_AUTH;
-    }
+    if (!key) return ADAM_ERR_AUTH;
 
     // Determine file extension for the mime type
     const char *filename;
@@ -205,7 +205,6 @@ static adam_status_t cloud_stt(
 
     curl_mime_free(mime);
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
     return status;
 }
 
@@ -226,18 +225,18 @@ static adam_status_t cloud_tts(
     const char *text,
     uint8_t **out_audio, size_t *out_len
 ) {
-    CURL *curl = curl_easy_init();
+    // Reuse persistent CURL handle
+    if (!s->_curl_tts) s->_curl_tts = curl_easy_init();
+    CURL *curl = (CURL *)s->_curl_tts;
     if (!curl) return ADAM_ERR_CURL;
+    curl_easy_reset(curl);
 
     const char *url = s->tts_api_url
         ? s->tts_api_url
         : "https://api.openai.com/v1/audio/speech";
 
     const char *key = s->tts_api_key ? s->tts_api_key : s->api_key;
-    if (!key) {
-        curl_easy_cleanup(curl);
-        return ADAM_ERR_AUTH;
-    }
+    if (!key) return ADAM_ERR_AUTH;
 
     // Determine response_format string for the API
     const char *fmt_str;
@@ -254,7 +253,7 @@ static adam_status_t cloud_tts(
     size_t text_len = strlen(text);
     size_t body_cap = text_len * 2 + 256;
     char *body = arena_alloc(arena, body_cap);
-    if (!body) { curl_easy_cleanup(curl); return ADAM_ERR_ALLOC; }
+    if (!body) return ADAM_ERR_ALLOC;
 
     // Simple JSON escape for the text
     size_t pos = 0;
@@ -321,7 +320,6 @@ static adam_status_t cloud_tts(
     }
 
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
     return status;
 }
 

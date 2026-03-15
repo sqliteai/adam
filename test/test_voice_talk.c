@@ -7,8 +7,8 @@
 //  Speaks in whatever language you use.
 //
 //  LLM:  Grok (xAI) via OpenAI-compatible API
-//  STT:  OpenAI Whisper API
-//  TTS:  OpenAI TTS API (voice: "nova") + miniaudio playback
+//  STT:  OpenAI gpt-4o-mini-transcribe (faster than whisper-1)
+//  TTS:  OpenAI gpt-4o-mini-tts (faster than tts-1) + miniaudio playback
 //
 //  Build & run:
 //    make talk
@@ -159,11 +159,13 @@ int main(void) {
     s->max_tokens = 150;  // voice replies should be short
     adam_settings_set_logger(s, on_log, NULL, ADAM_LOG_WARN);
 
-    // STT: OpenAI Whisper
-    adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, openai_key, "whisper-1");
+    // STT: OpenAI (gpt-4o-mini-transcribe is faster than whisper-1)
+    adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, openai_key,
+                          "gpt-4o-mini-transcribe");
 
-    // TTS: OpenAI TTS with neural voice
-    adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, openai_key, "tts-1", "nova");
+    // TTS: OpenAI (gpt-4o-mini-tts is faster than tts-1)
+    adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, openai_key,
+                          "gpt-4o-mini-tts", "coral");
     s->tts_format = ADAM_AUDIO_MP3;
 
     printf("\n");
@@ -171,8 +173,8 @@ int main(void) {
     printf("  ║       Adam Voice Conversation                ║\n");
     printf("  ╠══════════════════════════════════════════════╣\n");
     printf("  ║  LLM: %-39s║\n", llm_model);
-    printf("  ║  STT: OpenAI Whisper (cloud)                 ║\n");
-    printf("  ║  TTS: OpenAI TTS nova (cloud) + miniaudio    ║\n");
+    printf("  ║  STT: gpt-4o-mini-transcribe (cloud)           ║\n");
+    printf("  ║  TTS: gpt-4o-mini-tts coral + miniaudio       ║\n");
     printf("  ╠══════════════════════════════════════════════╣\n");
     printf("  ║  Speak naturally. Press Enter when done.     ║\n");
     printf("  ║  Press Ctrl+C to exit.                       ║\n");
