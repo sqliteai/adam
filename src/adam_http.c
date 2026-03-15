@@ -133,18 +133,28 @@ adam_llm_response_t adam_llm_call_http(
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
     if (http_code == 429) {
-        resp.error = ADAM_ERR_RATE_LIMIT;
-        resp.error_msg = arena_strdup(arena, "rate limited (429)");
+        // Try to parse error message from body, fall back to generic
+        resp = adam_json_parse_response(arena, s->api_format,
+                                        write_ctx.buf, write_ctx.len);
+        if (resp.error == ADAM_OK) resp.error = ADAM_ERR_RATE_LIMIT;
+        if (!resp.error_msg) resp.error_msg = arena_strdup(arena, "rate limited (429)");
     } else if (http_code == 401 || http_code == 403) {
-        resp.error = ADAM_ERR_AUTH;
-        resp.error_msg = arena_strdup(arena, "authentication error");
+        resp = adam_json_parse_response(arena, s->api_format,
+                                        write_ctx.buf, write_ctx.len);
+        if (resp.error == ADAM_OK) resp.error = ADAM_ERR_AUTH;
+        if (!resp.error_msg) resp.error_msg = arena_strdup(arena, "authentication error");
     } else if (http_code >= 400) {
-        resp.error = ADAM_ERR_PROVIDER;
-        resp.error_msg = write_ctx.buf
-            ? arena_strdup(arena, write_ctx.buf)
-            : arena_strdup(arena, "HTTP error");
+        // Parse error body to extract structured error message
+        resp = adam_json_parse_response(arena, s->api_format,
+                                        write_ctx.buf, write_ctx.len);
+        if (resp.error == ADAM_OK) resp.error = ADAM_ERR_PROVIDER;
+        if (!resp.error_msg) {
+            resp.error_msg = write_ctx.buf
+                ? arena_strdup(arena, write_ctx.buf)
+                : arena_strdup(arena, "HTTP error");
+        }
     } else {
-        // Parse response JSON
+        // Parse successful response JSON
         resp = adam_json_parse_response(
             arena, s->api_format,
             write_ctx.buf, write_ctx.len

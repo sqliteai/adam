@@ -5,7 +5,12 @@
 *.dylib
 *.dSYM/
 test_adam
+test_live
 adam
+
+# Secrets
+.env
+*.key
 
 # IDE / OS
 .DS_Store

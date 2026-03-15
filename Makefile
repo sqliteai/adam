@@ -46,7 +46,7 @@ OBJS := $(SRCS:.c=.o)
 # Targets
 # ============================================================================
 
-.PHONY: all clean test deps mbedtls curl
+.PHONY: all clean test live deps mbedtls curl
 
 all: libadam.a
 
@@ -66,6 +66,13 @@ test: test_adam
 test_adam: libadam.a test/test_adam.c
 	$(CC) $(CFLAGS) -g -fsanitize=address,undefined \
 		test/test_adam.c -L. -ladam $(LIBS) $(LDFLAGS) -o $@
+
+live: test_live
+	./test_live
+
+test_live: libadam.a test/test_live.c
+	$(CC) $(CFLAGS) -g -fsanitize=address,undefined \
+		test/test_live.c -L. -ladam $(LIBS) $(LDFLAGS) -o $@
 
 # --- Dependencies ---
 
@@ -95,5 +102,5 @@ curl: mbedtls
 # --- Clean ---
 
 clean:
-	rm -f $(OBJS) libadam.a test_adam
-	rm -rf test_adam.dSYM
+	rm -f $(OBJS) libadam.a test_adam test_live
+	rm -rf test_adam.dSYM test_live.dSYM
