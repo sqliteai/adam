@@ -284,7 +284,7 @@ adam_status_t adam_settings_set_http_callback(adam_settings_t *s,
 }
 
 // ============================================================================
-// MARK: - Voice Settings & Stubs
+// MARK: - Voice Settings (setters only — runtime is in adam_voice.c)
 // ============================================================================
 
 #if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
@@ -341,85 +341,6 @@ adam_status_t adam_settings_set_voice_callback(adam_settings_t *s,
     s->on_voice = fn;
     s->voice_ctx = ctx;
     return ADAM_OK;
-}
-
-// --- Voice runtime stubs ---
-
-adam_status_t adam_voice_start(adam_settings_t *s, adam_history_t *h) {
-    UNUSED_PARAM(h);
-    if (!s) return ADAM_ERR_INVALID_PARAM;
-    if (!s->voice_enabled) return ADAM_ERR_INVALID_PARAM;
-    if (s->stt_backend == ADAM_STT_NONE) return ADAM_ERR_INVALID_PARAM;
-    // TODO: implement voice thread (adam_voice.c)
-    ADAM_LOG(s, ADAM_LOG_WARN, "adam_voice_start: not yet implemented");
-    return ADAM_ERR_NOT_IMPLEMENTED;
-}
-
-void adam_voice_stop(adam_settings_t *s) {
-    if (!s) return;
-    // TODO: implement voice thread stop
-}
-
-int adam_voice_is_running(const adam_settings_t *s) {
-    if (!s) return 0;
-    return (s->_voice != NULL);
-}
-
-adam_status_t adam_stt_transcribe(adam_settings_t *s, arena_t *arena,
-                                  const uint8_t *audio, size_t audio_len,
-                                  adam_audio_format_t format,
-                                  const char **out_text) {
-    if (!s || !arena || !audio || !out_text) return ADAM_ERR_INVALID_PARAM;
-
-    // Custom callback takes priority
-    if (s->stt_fn) {
-        return s->stt_fn(s->stt_ctx, arena, audio, audio_len,
-                          format, s->stt_sample_rate, s->stt_language,
-                          out_text);
-    }
-
-    switch (s->stt_backend) {
-    case ADAM_STT_CLOUD:
-        // TODO: implement cloud STT via libcurl (adam_voice.c)
-        ADAM_LOG(s, ADAM_LOG_WARN, "cloud STT: not yet implemented");
-        return ADAM_ERR_NOT_IMPLEMENTED;
-
-    case ADAM_STT_LOCAL:
-        ADAM_LOG(s, ADAM_LOG_WARN, "local STT: not yet implemented");
-        return ADAM_ERR_NOT_IMPLEMENTED;
-
-    case ADAM_STT_NONE:
-    default:
-        return ADAM_ERR_INVALID_PARAM;
-    }
-}
-
-adam_status_t adam_tts_synthesize(adam_settings_t *s, arena_t *arena,
-                                  const char *text,
-                                  uint8_t **out_audio, size_t *out_len) {
-    if (!s || !arena || !text || !out_audio || !out_len)
-        return ADAM_ERR_INVALID_PARAM;
-
-    // Custom callback takes priority
-    if (s->tts_fn) {
-        return s->tts_fn(s->tts_ctx, arena, text, s->tts_voice,
-                          s->tts_format, out_audio, out_len);
-    }
-
-    switch (s->tts_backend) {
-    case ADAM_TTS_CLOUD:
-        // TODO: implement cloud TTS via libcurl (adam_voice.c)
-        ADAM_LOG(s, ADAM_LOG_WARN, "cloud TTS: not yet implemented");
-        return ADAM_ERR_NOT_IMPLEMENTED;
-
-    case ADAM_TTS_LOCAL:
-        ADAM_LOG(s, ADAM_LOG_WARN, "local TTS: not yet implemented");
-        return ADAM_ERR_NOT_IMPLEMENTED;
-
-    case ADAM_TTS_NONE:
-    default:
-        return ADAM_ERR_INVALID_PARAM;
-    }
 }
 
 #endif // !ADAM_NO_VOICE && !ADAM_NO_PTHREADS

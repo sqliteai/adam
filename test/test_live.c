@@ -565,6 +565,175 @@ static void test_thread_pool(adam_settings_t *s) {
 #endif // ADAM_NO_PTHREADS
 
 // ============================================================================
+// MARK: - Test 12: Voice — TTS speak (real audio playback)
+// ============================================================================
+
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+
+static const char *load_openai_key(void) {
+    FILE *f = fopen(".env", "r");
+    if (!f) return NULL;
+    static char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "OPENAI_API_KEY=", 15) == 0) {
+            fclose(f);
+            char *val = line + 15;
+            size_t len = strlen(val);
+            while (len > 0 && (val[len-1] == '\n' || val[len-1] == '\r'))
+                val[--len] = '\0';
+            return val;
+        }
+    }
+    fclose(f);
+    return NULL;
+}
+
+static void test_voice_speak(adam_settings_t *s) {
+    printf("\n--- Test 12: Voice — agent speaks response (TTS + playback) ---\n");
+
+    const char *oai_key = load_openai_key();
+    if (!oai_key) {
+        printf("  (skipped: OPENAI_API_KEY not in .env)\n");
+        // Use macOS `say` as fallback for demonstration
+        printf("  Falling back to macOS `say` command...\n");
+
+        adam_history_t *h = adam_history_create();
+        adam_run_result_t r = adam_run(s, h,
+            "Say something short and friendly in one sentence.");
+        printf("  Response:   %.80s\n", r.final_response ? r.final_response : "(null)");
+
+        if (r.status == ADAM_OK && r.final_response) {
+            // Use macOS say command directly as TTS fallback
+            char cmd[1024];
+            snprintf(cmd, sizeof(cmd), "say \"%s\"", r.final_response);
+            int ret = system(cmd);
+            int ok = (ret == 0);
+            report("voice_speak_say", ok, &r);
+        } else {
+            report("voice_speak_say", 0, &r);
+        }
+
+        adam_run_result_free(&r);
+        adam_history_destroy(h);
+        return;
+    }
+
+    // Configure TTS with OpenAI
+    adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, oai_key, "tts-1", "nova");
+    s->tts_format = ADAM_AUDIO_MP3;
+
+    // Ask the agent something, then speak the response
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h,
+        "Tell me a very short fun fact about dolphins. One sentence.");
+    printf("  Response:   %.80s\n", r.final_response ? r.final_response : "(null)");
+
+    if (r.status == ADAM_OK && r.final_response) {
+        printf("  Speaking via OpenAI TTS...\n");
+        adam_status_t tts_rc = adam_tts_speak(s, r.final_response);
+        printf("  TTS status: %s\n", adam_status_string(tts_rc));
+        report("voice_speak_tts", tts_rc == ADAM_OK, &r);
+    } else {
+        report("voice_speak_tts", 0, &r);
+    }
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+}
+
+// Mock STT for live pipeline test
+static adam_status_t mock_stt_live_fn(void *ctx, arena_t *arena,
+    const uint8_t *audio, size_t audio_len,
+    adam_audio_format_t format, int sample_rate,
+    const char *language, const char **out_text) {
+    UNUSED_PARAM(audio); UNUSED_PARAM(audio_len);
+    UNUSED_PARAM(format); UNUSED_PARAM(sample_rate); UNUSED_PARAM(language);
+    (*(int *)ctx)++;
+    *out_text = arena_strdup(arena, "What is the speed of light?");
+    return ADAM_OK;
+}
+
+static void test_voice_full_pipeline(adam_settings_t *s) {
+    printf("\n--- Test 13: Voice — full pipeline (STT → agent → TTS → play) ---\n");
+
+    const char *oai_key = load_openai_key();
+    if (!oai_key) {
+        printf("  (skipped: OPENAI_API_KEY not in .env)\n");
+        printf("  Using mock STT + macOS say...\n");
+
+        static int mock_stt_live_calls;
+        mock_stt_live_calls = 0;
+
+        adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, NULL, NULL);
+        adam_settings_set_stt_callback(s, mock_stt_live_fn, &mock_stt_live_calls);
+
+        adam_history_t *h = adam_history_create();
+        uint8_t fake_wav[] = {0}; // mock STT ignores actual audio
+        adam_run_result_t r = adam_voice_run(s, h, fake_wav, sizeof(fake_wav),
+                                             ADAM_AUDIO_WAV);
+
+        printf("  Transcribed: What is the speed of light?\n");
+        printf("  Response:    %.80s\n", r.final_response ? r.final_response : "(null)");
+
+        // Speak using macOS say since no OpenAI key
+        if (r.status == ADAM_OK && r.final_response) {
+            char cmd[1024];
+            snprintf(cmd, sizeof(cmd), "say \"%s\"", r.final_response);
+            system(cmd);
+        }
+
+        int ok = (r.status == ADAM_OK && r.final_response != NULL);
+        report("voice_pipeline_mock", ok, &r);
+
+        adam_run_result_free(&r);
+        adam_history_destroy(h);
+        return;
+    }
+
+    // Full pipeline with real OpenAI STT + TTS
+    adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, oai_key, "whisper-1");
+    adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, oai_key, "tts-1", "nova");
+    s->tts_format = ADAM_AUDIO_MP3;
+
+    // First, synthesize a question as audio, then transcribe it back
+    printf("  Generating speech for 'What is the tallest mountain?'...\n");
+    arena_t *arena = arena_create(512 * 1024);
+    uint8_t *question_audio = NULL;
+    size_t question_len = 0;
+
+    adam_status_t synth_rc = adam_tts_synthesize(s, arena,
+        "What is the tallest mountain?", &question_audio, &question_len);
+
+    if (synth_rc != ADAM_OK) {
+        printf("  TTS synth failed: %s\n", adam_status_string(synth_rc));
+        report("voice_pipeline_full", 0, NULL);
+        arena_destroy(arena);
+        return;
+    }
+    printf("  Generated %zu bytes of audio\n", question_len);
+
+    // Now do the full voice pipeline: STT the audio → agent → TTS → play
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_voice_run(s, h, question_audio, question_len,
+                                         ADAM_AUDIO_MP3);
+
+    printf("  Transcribed: (from audio)\n");
+    printf("  Response:    %.80s\n", r.final_response ? r.final_response : "(null)");
+    printf("  History:     %zu messages\n", adam_history_count(h));
+
+    // Should mention Everest
+    int ok = (r.status == ADAM_OK && r.final_response
+              && str_contains_ci(r.final_response, "Everest"));
+    report("voice_pipeline_full", ok, &r);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    arena_destroy(arena);
+}
+
+#endif // !ADAM_NO_VOICE && !ADAM_NO_PTHREADS
+
+// ============================================================================
 // MARK: - Main
 // ============================================================================
 
@@ -597,6 +766,11 @@ int main(void) {
 
 #ifndef ADAM_NO_PTHREADS
     test_thread_pool(s);
+#endif
+
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+    test_voice_speak(s);
+    test_voice_full_pipeline(s);
 #endif
 
     printf("\n========================\n");

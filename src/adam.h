@@ -281,6 +281,17 @@ typedef int (*adam_voice_event_fn)(
     float                confidence          // 0.0 - 1.0
 );
 
+// --- Audio playback callback ---
+// Called to play synthesized audio. The embedder handles platform-specific
+// playback (CoreAudio, ALSA, etc.). If NULL, adam uses a default player
+// (afplay on macOS, aplay on Linux).
+typedef adam_status_t (*adam_audio_play_fn)(
+    void                *ctx,
+    const uint8_t       *audio_data,
+    size_t               audio_len,
+    adam_audio_format_t  format
+);
+
 #endif // !ADAM_NO_VOICE && !ADAM_NO_PTHREADS
 
 // ============================================================================
@@ -482,6 +493,10 @@ struct adam_settings_t {
     // Voice event callback (called when speech is transcribed)
     adam_voice_event_fn  on_voice;           // default: NULL (accept all)
     void                *voice_ctx;          // default: NULL
+
+    // Audio playback
+    adam_audio_play_fn   audio_play_fn;      // default: NULL (use system player)
+    void                *audio_play_ctx;     // default: NULL
 
     // Silence detection
     float                voice_silence_sec;  // default: 1.0 (seconds of silence to trigger STT)
@@ -731,6 +746,20 @@ adam_status_t   adam_stt_transcribe(adam_settings_t *s, arena_t *arena,
 adam_status_t   adam_tts_synthesize(adam_settings_t *s, arena_t *arena,
                     const char *text,
                     uint8_t **out_audio, size_t *out_len);
+
+// Speak text aloud: synthesize + play via audio_play_fn or system player.
+adam_status_t   adam_tts_speak(adam_settings_t *s, const char *text);
+
+// Play raw audio data via audio_play_fn or system player.
+adam_status_t   adam_audio_play(adam_settings_t *s,
+                    const uint8_t *audio, size_t len,
+                    adam_audio_format_t format);
+
+// Full voice turn: transcribe audio → run agent → speak response.
+// Convenience function that chains STT → adam_run → TTS → play.
+adam_run_result_t adam_voice_run(adam_settings_t *s, adam_history_t *h,
+                    const uint8_t *audio, size_t audio_len,
+                    adam_audio_format_t format);
 
 #endif // !ADAM_NO_VOICE && !ADAM_NO_PTHREADS
 

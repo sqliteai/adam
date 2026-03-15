@@ -1169,9 +1169,10 @@ TEST(voice_tts_local_not_implemented) {
     adam_settings_destroy(s);
 }
 
-TEST(voice_stt_cloud_not_implemented) {
+TEST(voice_stt_cloud_bad_key) {
+    // Cloud STT with a fake key should fail with an error (not crash)
     adam_settings_t *s = adam_create_settings();
-    adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, "key", NULL);
+    adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, "fake-key", NULL);
 
     arena_t *a = arena_create(4096);
     const char *text = NULL;
@@ -1179,15 +1180,17 @@ TEST(voice_stt_cloud_not_implemented) {
 
     adam_status_t rc = adam_stt_transcribe(s, a, audio, sizeof(audio),
                                            ADAM_AUDIO_WAV, &text);
-    ASSERT_EQ(rc, ADAM_ERR_NOT_IMPLEMENTED);
+    // Should fail (auth error or voice error), but not crash
+    ASSERT_NE(rc, ADAM_OK);
 
     arena_destroy(a);
     adam_settings_destroy(s);
 }
 
-TEST(voice_tts_cloud_not_implemented) {
+TEST(voice_tts_cloud_bad_key) {
+    // Cloud TTS with a fake key should fail with an error (not crash)
     adam_settings_t *s = adam_create_settings();
-    adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, "key", NULL, NULL);
+    adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, "fake-key", NULL, NULL);
 
     arena_t *a = arena_create(4096);
     uint8_t *audio = NULL;
@@ -1195,7 +1198,8 @@ TEST(voice_tts_cloud_not_implemented) {
 
     adam_status_t rc = adam_tts_synthesize(s, a, "Hello world",
                                            &audio, &len);
-    ASSERT_EQ(rc, ADAM_ERR_NOT_IMPLEMENTED);
+    // Should fail (auth error or voice error), but not crash
+    ASSERT_NE(rc, ADAM_OK);
 
     arena_destroy(a);
     adam_settings_destroy(s);
@@ -1247,6 +1251,82 @@ TEST(voice_custom_stt_callback) {
     ASSERT_EQ(stt_calls, 1);
 
     arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+// Mock STT for pipeline test: returns "What is 2+2?"
+static adam_status_t mock_stt_pipeline(void *ctx, arena_t *arena,
+    const uint8_t *audio, size_t audio_len,
+    adam_audio_format_t format, int sample_rate,
+    const char *language, const char **out_text) {
+    UNUSED_PARAM(audio); UNUSED_PARAM(audio_len);
+    UNUSED_PARAM(format); UNUSED_PARAM(sample_rate); UNUSED_PARAM(language);
+    (*(int *)ctx)++;
+    *out_text = arena_strdup(arena, "What is 2+2?");
+    return ADAM_OK;
+}
+
+// Mock TTS for pipeline test: returns 8 bytes of fake audio
+static adam_status_t mock_tts_pipeline(void *ctx, arena_t *arena,
+    const char *text, const char *voice, adam_audio_format_t out_format,
+    uint8_t **out_audio, size_t *out_len) {
+    UNUSED_PARAM(text); UNUSED_PARAM(voice); UNUSED_PARAM(out_format);
+    (*(int *)ctx)++;
+    *out_len = 8;
+    *out_audio = arena_alloc(arena, 8);
+    memset(*out_audio, 0xAA, 8);
+    return ADAM_OK;
+}
+
+// Mock audio player for pipeline test: just counts calls
+static adam_status_t mock_audio_play(void *ctx, const uint8_t *audio,
+    size_t len, adam_audio_format_t format) {
+    UNUSED_PARAM(audio); UNUSED_PARAM(len); UNUSED_PARAM(format);
+    (*(int *)ctx)++;
+    return ADAM_OK;
+}
+
+TEST(voice_run_full_pipeline) {
+    // Full voice pipeline: audio → STT → agent → TTS → play
+    // All via mock callbacks (no real API calls)
+    int stt_calls = 0;
+    int tts_calls = 0;
+    int play_calls = 0;
+
+    // Setup: mock LLM that answers "4"
+    mock_llm_ctx_t llm_mock = { .fixed_response = "4" };
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &llm_mock);
+
+    // Configure voice with all mock callbacks
+    adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, NULL, NULL);
+    adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, NULL, NULL, NULL);
+    adam_settings_set_stt_callback(s, mock_stt_pipeline, &stt_calls);
+    adam_settings_set_tts_callback(s, mock_tts_pipeline, &tts_calls);
+    s->audio_play_fn = mock_audio_play;
+    s->audio_play_ctx = &play_calls;
+
+    // Run full voice pipeline
+    adam_history_t *h = adam_history_create();
+    uint8_t fake_audio[] = {0, 1, 2, 3, 4, 5};
+    adam_run_result_t r = adam_voice_run(s, h, fake_audio, sizeof(fake_audio),
+                                         ADAM_AUDIO_WAV);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_NOT_NULL(r.final_response);
+    ASSERT_STR_EQ(r.final_response, "4");
+    ASSERT_EQ(stt_calls, 1);      // STT was called
+    ASSERT_EQ(llm_mock.call_count, 1); // LLM was called
+    ASSERT_EQ(tts_calls, 1);      // TTS was called
+    ASSERT_EQ(play_calls, 1);     // Audio was played
+
+    // History should have: system + user("What is 2+2?") + assistant("4")
+    ASSERT_EQ(adam_history_count(h), 3);
+    ASSERT_STR_EQ(h->items[1].content, "What is 2+2?");
+    ASSERT_STR_EQ(h->items[2].content, "4");
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
     adam_settings_destroy(s);
 }
 
@@ -1780,10 +1860,11 @@ int main(void) {
     RUN(voice_start_not_implemented);
     RUN(voice_stt_local_not_implemented);
     RUN(voice_tts_local_not_implemented);
-    RUN(voice_stt_cloud_not_implemented);
-    RUN(voice_tts_cloud_not_implemented);
+    RUN(voice_stt_cloud_bad_key);
+    RUN(voice_tts_cloud_bad_key);
     RUN(voice_custom_stt_callback);
     RUN(voice_custom_tts_callback);
+    RUN(voice_run_full_pipeline);
 #endif
 
     // --- Performance ---
