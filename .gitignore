@@ -6,6 +6,7 @@
 *.dSYM/
 test_adam
 test_live
+test_voice_interactive
 adam
 
 # Secrets

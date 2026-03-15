@@ -90,8 +90,11 @@ adam_llm_response_t adam_llm_call_http(
         curl_easy_cleanup(curl);
         return resp;
     }
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    // Use COPYPOSTFIELDS so curl owns a copy of the body.
+    // (POSTFIELDS stores only a pointer, which can be invalidated if
+    // the write callback allocates from the same arena.)
+    curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, body);
+
 
     // Headers
     struct curl_slist *headers = NULL;
@@ -131,6 +134,7 @@ adam_llm_response_t adam_llm_call_http(
     // Check HTTP status
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
 
     if (http_code == 429) {
         // Try to parse error message from body, fall back to generic

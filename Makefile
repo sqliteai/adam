@@ -46,7 +46,7 @@ OBJS := $(SRCS:.c=.o)
 # Targets
 # ============================================================================
 
-.PHONY: all clean test live deps mbedtls curl
+.PHONY: all clean test live voice deps mbedtls curl
 
 all: libadam.a
 
@@ -73,6 +73,16 @@ live: test_live
 test_live: libadam.a test/test_live.c
 	$(CC) $(CFLAGS) -g -fsanitize=address,undefined \
 		test/test_live.c -L. -ladam $(LIBS) $(LDFLAGS) -o $@
+
+voice: test_voice_interactive
+	./test_voice_interactive
+
+test_voice_interactive: libadam.a test/test_voice_interactive.c src/adam_mic_macos.m
+	$(CC) $(CFLAGS) -g \
+		test/test_voice_interactive.c src/adam_mic_macos.m \
+		-L. -ladam $(LIBS) $(LDFLAGS) \
+		-framework AVFoundation -framework Foundation \
+		-o $@
 
 # --- Dependencies ---
 
@@ -102,5 +112,5 @@ curl: mbedtls
 # --- Clean ---
 
 clean:
-	rm -f $(OBJS) libadam.a test_adam test_live
-	rm -rf test_adam.dSYM test_live.dSYM
+	rm -f $(OBJS) libadam.a test_adam test_live test_voice_interactive
+	rm -rf test_adam.dSYM test_live.dSYM test_voice_interactive.dSYM
