@@ -461,11 +461,13 @@ adam_status_t adam_audio_play(adam_settings_t *s,
 
 #ifndef ADAM_NO_CURL
 
-// curl write callback that feeds PCM directly to the player
+// Streaming TTS context: buffers initial data to detect errors,
+// then starts the PCM player and feeds remaining chunks directly.
 typedef struct {
-    adam_pcm_player_t *player;
-    long               http_code;
-    int                error;
+    adam_pcm_player_t *player;       // NULL until first valid PCM chunk
+    uint8_t            prebuf[4096]; // initial buffer to detect JSON errors
+    size_t             prebuf_len;
+    int                is_error;     // set if response looks like JSON error
 } stream_tts_ctx_t;
 
 static size_t stream_tts_write_cb(char *data, size_t size, size_t nmemb,
@@ -473,25 +475,60 @@ static size_t stream_tts_write_cb(char *data, size_t size, size_t nmemb,
     stream_tts_ctx_t *ctx = (stream_tts_ctx_t *)userp;
     size_t bytes = size * nmemb;
 
-    if (ctx->player && !ctx->error) {
-        adam_pcm_player_feed(ctx->player, (const uint8_t *)data, bytes);
+    if (ctx->is_error) return bytes; // swallow error body
+
+    // Buffer initial data to check if it's PCM or a JSON error
+    if (!ctx->player) {
+        size_t space = sizeof(ctx->prebuf) - ctx->prebuf_len;
+        size_t copy = bytes < space ? bytes : space;
+        memcpy(ctx->prebuf + ctx->prebuf_len, data, copy);
+        ctx->prebuf_len += copy;
+
+        // Check: JSON errors start with '{' or whitespace+'{'
+        // PCM data is raw int16 samples — very unlikely to start with '{'
+        const uint8_t *p = ctx->prebuf;
+        size_t plen = ctx->prebuf_len;
+        while (plen > 0 && (*p == ' ' || *p == '\n' || *p == '\r')) { p++; plen--; }
+        if (plen > 0 && *p == '{') {
+            ctx->is_error = 1;
+            return bytes;
+        }
+
+        // Wait for enough data before starting player (~100ms of audio
+        // at 24kHz mono s16 = 4800 bytes). This prevents underrun clicks.
+        if (ctx->prebuf_len < 4800 && bytes == copy) {
+            return bytes; // keep buffering
+        }
+
+        // Start the player now
+        ctx->player = adam_pcm_player_start(24000, 1);
+        if (!ctx->player) {
+            ctx->is_error = 1;
+            return bytes;
+        }
+
+        // Feed the prebuffer
+        adam_pcm_player_feed(ctx->player, ctx->prebuf, ctx->prebuf_len);
+
+        // Feed any remaining data from this chunk that didn't fit in prebuf
+        if (copy < bytes) {
+            adam_pcm_player_feed(ctx->player,
+                                (const uint8_t *)data + copy, bytes - copy);
+        }
+        return bytes;
     }
+
+    // Normal path: feed directly to player
+    adam_pcm_player_feed(ctx->player, (const uint8_t *)data, bytes);
     return bytes;
 }
 
 static adam_status_t cloud_tts_streaming(
     adam_settings_t *s, const char *text
 ) {
-    // Start PCM player immediately (OpenAI PCM is 24kHz mono s16le)
-    adam_pcm_player_t *player = adam_pcm_player_start(24000, 1);
-    if (!player) return ADAM_ERR_VOICE;
-
     if (!s->_curl_tts) s->_curl_tts = curl_easy_init();
     CURL *curl = (CURL *)s->_curl_tts;
-    if (!curl) {
-        adam_pcm_player_finish(player);
-        return ADAM_ERR_CURL;
-    }
+    if (!curl) return ADAM_ERR_CURL;
     curl_easy_reset(curl);
 
     const char *url = s->tts_api_url
@@ -499,19 +536,13 @@ static adam_status_t cloud_tts_streaming(
         : "https://api.openai.com/v1/audio/speech";
 
     const char *key = s->tts_api_key ? s->tts_api_key : s->api_key;
-    if (!key) {
-        adam_pcm_player_finish(player);
-        return ADAM_ERR_AUTH;
-    }
+    if (!key) return ADAM_ERR_AUTH;
 
     // Build JSON body — force response_format=pcm for streaming
     size_t text_len = strlen(text);
     size_t body_cap = text_len * 2 + 256;
     char *body = malloc(body_cap);
-    if (!body) {
-        adam_pcm_player_finish(player);
-        return ADAM_ERR_ALLOC;
-    }
+    if (!body) return ADAM_ERR_ALLOC;
 
     size_t pos = 0;
     pos += (size_t)snprintf(body + pos, body_cap - pos,
@@ -539,7 +570,7 @@ static adam_status_t cloud_tts_streaming(
     headers = curl_slist_append(headers, "Content-Type: application/json");
     headers = curl_slist_append(headers, auth_hdr);
 
-    stream_tts_ctx_t write_ctx = { .player = player };
+    stream_tts_ctx_t write_ctx = {0};
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, body);
@@ -561,12 +592,19 @@ static adam_status_t cloud_tts_streaming(
         else if (http_code >= 400) status = ADAM_ERR_VOICE;
     }
 
+    if (write_ctx.is_error && status == ADAM_OK) {
+        status = ADAM_ERR_VOICE;
+    }
+
     curl_slist_free_all(headers);
     free(auth_hdr);
     free(body);
 
-    // Wait for playback to drain, then stop
-    adam_pcm_player_finish(player);
+    // Wait for playback to drain (if player was started)
+    if (write_ctx.player) {
+        adam_pcm_player_finish(write_ctx.player);
+    }
+
     return status;
 }
 
