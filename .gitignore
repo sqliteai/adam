@@ -1,0 +1,23 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+test_adam
+adam
+
+# IDE / OS
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Dependency build artifacts
+deps/*/build/
+deps/*/CMakeCache.txt
+deps/*/CMakeFiles/
+deps/*/cmake_install.cmake
+deps/*/Makefile
+deps/*/*.a

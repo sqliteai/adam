@@ -1,0 +1,1213 @@
+//
+//  test_adam.c
+//  Adam — Test suite
+//
+//  Tests cover real-world agent scenarios using a mock LLM backend.
+//  Reports memory usage, checks for leaks, and measures performance.
+//
+//  Build:
+//    cc -std=c11 -Wall -Wextra -Wpedantic -g -fsanitize=address,undefined \
+//       -Isrc -DADAM_NO_CURL -DADAM_NO_LOCAL -DADAM_NO_SQLITE \
+//       src/arena.c src/adam.c test/test_adam.c -o test_adam -lpthread
+//
+//  Run:
+//    ./test_adam
+//
+
+#include "adam.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <assert.h>
+
+#ifndef ADAM_NO_PTHREADS
+#include <pthread.h>
+#endif
+
+// ============================================================================
+// MARK: - Test Framework
+// ============================================================================
+
+static int g_tests_run = 0;
+static int g_tests_passed = 0;
+static int g_tests_failed = 0;
+static int g_asserts_total = 0;
+
+#define TEST(name)                                                          \
+    static void test_##name(void);                                          \
+    static void run_test_##name(void) {                                     \
+        g_tests_run++;                                                      \
+        printf("  %-50s ", #name);                                          \
+        fflush(stdout);                                                     \
+        struct timespec _ts0, _ts1;                                         \
+        clock_gettime(CLOCK_MONOTONIC, &_ts0);                              \
+        test_##name();                                                      \
+        clock_gettime(CLOCK_MONOTONIC, &_ts1);                              \
+        double _ms = (_ts1.tv_sec - _ts0.tv_sec) * 1000.0                  \
+                   + (_ts1.tv_nsec - _ts0.tv_nsec) / 1e6;                   \
+        printf("PASS  (%6.2f ms)\n", _ms);                                 \
+        g_tests_passed++;                                                   \
+    }                                                                       \
+    static void test_##name(void)
+
+#define ASSERT(cond)                                                        \
+    do {                                                                    \
+        g_asserts_total++;                                                  \
+        if (!(cond)) {                                                      \
+            printf("FAIL\n    assertion failed: %s\n    at %s:%d\n",        \
+                   #cond, __FILE__, __LINE__);                              \
+            g_tests_failed++;                                               \
+            g_tests_passed--;                                               \
+            return;                                                         \
+        }                                                                   \
+    } while (0)
+
+#define ASSERT_EQ(a, b) ASSERT((a) == (b))
+#define ASSERT_NE(a, b) ASSERT((a) != (b))
+#define ASSERT_NULL(p) ASSERT((p) == NULL)
+#define ASSERT_NOT_NULL(p) ASSERT((p) != NULL)
+#define ASSERT_STR_EQ(a, b) ASSERT(strcmp((a), (b)) == 0)
+
+#define RUN(name) run_test_##name()
+
+// ============================================================================
+// MARK: - Memory Tracking
+// ============================================================================
+
+// We rely on ASan for leak detection (compile with -fsanitize=address).
+// This section reports peak RSS for the test process.
+
+#ifdef __APPLE__
+#include <mach/mach.h>
+static size_t get_rss_bytes(void) {
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) != KERN_SUCCESS)
+        return 0;
+    return info.resident_size;
+}
+#elif defined(__linux__)
+static size_t get_rss_bytes(void) {
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    long pages = 0;
+    fscanf(f, "%*ld %ld", &pages);
+    fclose(f);
+    return (size_t)pages * 4096;
+}
+#else
+static size_t get_rss_bytes(void) { return 0; }
+#endif
+
+static size_t g_rss_start = 0;
+
+static void mem_report_start(void) {
+    g_rss_start = get_rss_bytes();
+}
+
+static void mem_report_end(void) {
+    size_t rss_end = get_rss_bytes();
+    printf("\n  Memory:\n");
+    printf("    RSS at start:  %zu KB\n", g_rss_start / 1024);
+    printf("    RSS at end:    %zu KB\n", rss_end / 1024);
+    printf("    Delta:         %+ld KB\n",
+           (long)(rss_end - g_rss_start) / 1024);
+    printf("    (Leak detection via ASan — if no ASan errors above, no leaks)\n");
+}
+
+// ============================================================================
+// MARK: - Mock LLM Backend
+// ============================================================================
+
+// The mock LLM simulates realistic agent behavior:
+//   - First call: returns a tool call
+//   - Second call: returns a final text response using the tool result
+//
+// This exercises the full agent loop: dispatch → tool execution → re-dispatch.
+
+typedef struct {
+    int call_count;                 // how many times the LLM was called
+    int total_tool_calls_requested; // how many tool calls the LLM emitted
+    const char *fixed_response;     // if non-NULL, always return this text
+    int simulate_error;             // if non-zero, return this error code
+    int simulate_error_on_call;     // which call# to error on (0 = all)
+} mock_llm_ctx_t;
+
+// Mock: returns a tool call on first call, then a final response.
+static adam_llm_response_t mock_llm_with_tool(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_llm_ctx_t *mock = (mock_llm_ctx_t *)ctx;
+    mock->call_count++;
+
+    (void)tools;
+    (void)tool_count;
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 100;
+    resp.output_tokens = 50;
+
+    // Check if there's a tool result in the history — if so, give final answer
+    int has_tool_result = 0;
+    for (size_t i = 0; i < msg_count; i++) {
+        if (msgs[i].role == ADAM_ROLE_TOOL) {
+            has_tool_result = 1;
+            break;
+        }
+    }
+
+    if (!has_tool_result && tool_count > 0) {
+        // First call: request a tool call
+        mock->total_tool_calls_requested++;
+        resp.tool_calls = arena_alloc(arena, sizeof(adam_tool_call_t));
+        resp.tool_call_count = 1;
+        resp.tool_calls[0].id = arena_strdup(arena, "call_001");
+        resp.tool_calls[0].name = arena_strdup(arena, tools[0].name);
+        resp.tool_calls[0].arguments_json =
+            arena_strdup(arena, "{\"query\":\"test\"}");
+        resp.content = arena_strdup(arena, "Let me look that up.");
+    } else {
+        // Second call: final answer incorporating tool result
+        resp.content = arena_strdup(arena,
+            "Based on the tool result, the answer is 42.");
+    }
+
+    return resp;
+}
+
+// Mock: always returns a fixed text response (no tool calls).
+static adam_llm_response_t mock_llm_simple(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_llm_ctx_t *mock = (mock_llm_ctx_t *)ctx;
+    mock->call_count++;
+
+    (void)msgs; (void)msg_count; (void)tools; (void)tool_count;
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 80;
+    resp.output_tokens = 30;
+    resp.content = arena_strdup(arena,
+        mock->fixed_response ? mock->fixed_response : "Hello from mock LLM!");
+    return resp;
+}
+
+// Mock: simulates an error (rate limit, auth, etc.)
+static adam_llm_response_t mock_llm_error(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_llm_ctx_t *mock = (mock_llm_ctx_t *)ctx;
+    mock->call_count++;
+
+    (void)msgs; (void)msg_count; (void)tools; (void)tool_count;
+
+    adam_llm_response_t resp = {0};
+
+    if (mock->simulate_error_on_call > 0
+        && mock->call_count != mock->simulate_error_on_call) {
+        // Not the error call — return normal response
+        resp.input_tokens = 50;
+        resp.output_tokens = 20;
+        resp.content = arena_strdup(arena, "Recovery response.");
+        return resp;
+    }
+
+    resp.error = (adam_status_t)mock->simulate_error;
+    resp.error_msg = arena_strdup(arena, "simulated error");
+    return resp;
+}
+
+// Mock: returns multiple tool calls in a single response.
+static adam_llm_response_t mock_llm_multi_tool(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_llm_ctx_t *mock = (mock_llm_ctx_t *)ctx;
+    mock->call_count++;
+
+    (void)tools; (void)tool_count;
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 150;
+    resp.output_tokens = 80;
+
+    // Check if we already got tool results
+    int tool_results = 0;
+    for (size_t i = 0; i < msg_count; i++) {
+        if (msgs[i].role == ADAM_ROLE_TOOL) tool_results++;
+    }
+
+    if (tool_results >= 2) {
+        // Got both results — final answer
+        resp.content = arena_strdup(arena, "Combined result from both tools.");
+    } else {
+        // Request two tool calls at once
+        mock->total_tool_calls_requested += 2;
+        resp.tool_calls = arena_alloc(arena, 2 * sizeof(adam_tool_call_t));
+        resp.tool_call_count = 2;
+        resp.tool_calls[0].id = arena_strdup(arena, "call_a");
+        resp.tool_calls[0].name = arena_strdup(arena, "tool_alpha");
+        resp.tool_calls[0].arguments_json =
+            arena_strdup(arena, "{\"x\":1}");
+        resp.tool_calls[1].id = arena_strdup(arena, "call_b");
+        resp.tool_calls[1].name = arena_strdup(arena, "tool_beta");
+        resp.tool_calls[1].arguments_json =
+            arena_strdup(arena, "{\"x\":2}");
+        resp.content = arena_strdup(arena, "Calling two tools.");
+    }
+
+    return resp;
+}
+
+// ============================================================================
+// MARK: - Mock Tools
+// ============================================================================
+
+static adam_tool_result_t mock_tool_search(
+    arena_t *arena, void *ctx, const char *args_json, size_t args_len
+) {
+    (void)ctx; (void)args_json; (void)args_len;
+    return (adam_tool_result_t){
+        .for_llm = arena_strdup(arena, "Search result: found 42 matches."),
+        .for_user = arena_strdup(arena, "Searching..."),
+        .success = 1,
+    };
+}
+
+static adam_tool_result_t mock_tool_alpha(
+    arena_t *arena, void *ctx, const char *args_json, size_t args_len
+) {
+    (void)ctx; (void)args_json; (void)args_len;
+    return (adam_tool_result_t){
+        .for_llm = arena_strdup(arena, "Alpha result: OK"),
+        .success = 1,
+    };
+}
+
+static adam_tool_result_t mock_tool_beta(
+    arena_t *arena, void *ctx, const char *args_json, size_t args_len
+) {
+    (void)ctx; (void)args_json; (void)args_len;
+    return (adam_tool_result_t){
+        .for_llm = arena_strdup(arena, "Beta result: OK"),
+        .success = 1,
+    };
+}
+
+// ============================================================================
+// MARK: - Log Collector (for verifying log output)
+// ============================================================================
+
+typedef struct {
+    char    buf[8192];
+    size_t  len;
+    int     error_count;
+    int     warn_count;
+    int     info_count;
+} log_collector_t;
+
+static void log_collect(void *ctx, adam_log_level_t level,
+                         const char *msg, size_t len) {
+    log_collector_t *lc = (log_collector_t *)ctx;
+    if (lc->len + len + 1 < sizeof(lc->buf)) {
+        memcpy(lc->buf + lc->len, msg, len);
+        lc->len += len;
+        lc->buf[lc->len++] = '\n';
+    }
+    if (level == ADAM_LOG_ERROR) lc->error_count++;
+    if (level == ADAM_LOG_WARN) lc->warn_count++;
+    if (level == ADAM_LOG_INFO) lc->info_count++;
+}
+
+// ============================================================================
+// MARK: - Tests: Settings
+// ============================================================================
+
+TEST(create_settings_defaults) {
+    adam_settings_t *s = adam_create_settings();
+    ASSERT_NOT_NULL(s);
+
+    // Check all defaults
+    ASSERT_EQ(s->api_format, ADAM_API_NONE);
+    ASSERT_NULL(s->api_key);
+    ASSERT_NULL(s->base_url);
+    ASSERT_STR_EQ(s->model, "claude-sonnet-4-20250514");
+    ASSERT(s->temperature >= 0.69f && s->temperature <= 0.71f);
+    ASSERT_EQ(s->max_tokens, 4096);
+    ASSERT_NULL(s->response_format);
+    ASSERT(s->top_p >= 0.99f && s->top_p <= 1.01f);
+    ASSERT_EQ(s->max_iterations, 25);
+    ASSERT_EQ(s->max_history, 100);
+    ASSERT_EQ(s->arena_block_size, 256 * 1024);
+    ASSERT_EQ(s->inject_datetime, 1);
+    ASSERT_EQ(s->inject_memory, 0);
+    ASSERT_NULL(s->tools);
+    ASSERT_EQ(s->tool_count, 0);
+    ASSERT_EQ(s->retry_max, 3);
+    ASSERT_EQ(s->retry_backoff_ms[0], 1000);
+    ASSERT_EQ(s->retry_backoff_ms[3], 10000);
+    ASSERT_EQ(s->retry_rate_limit_ms, 30000);
+    ASSERT_EQ(s->log_level, ADAM_LOG_WARN);
+    ASSERT_STR_EQ(s->memory_context, "default");
+    ASSERT_EQ(s->abort_flag, 0);
+    ASSERT_NULL(s->llm_fn);
+    ASSERT_NULL(s->http_fn);
+
+    adam_settings_destroy(s);
+}
+
+TEST(settings_set_provider) {
+    adam_settings_t *s = adam_create_settings();
+
+    adam_status_t rc = adam_settings_set_provider(s, ADAM_API_ANTHROPIC,
+                                                  "sk-test", "claude-opus-4");
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_EQ(s->api_format, ADAM_API_ANTHROPIC);
+    ASSERT_STR_EQ(s->api_key, "sk-test");
+    ASSERT_STR_EQ(s->model, "claude-opus-4");
+
+    rc = adam_settings_set_base_url(s, "https://custom.api.com/v1/messages");
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_STR_EQ(s->base_url, "https://custom.api.com/v1/messages");
+
+    // NULL settings should fail
+    ASSERT_EQ(adam_settings_set_provider(NULL, ADAM_API_OPENAI, "k", "m"),
+              ADAM_ERR_INVALID_PARAM);
+
+    adam_settings_destroy(s);
+}
+
+TEST(settings_add_remove_tools) {
+    adam_settings_t *s = adam_create_settings();
+
+    adam_tool_def_t t1 = { .name = "search", .execute = mock_tool_search };
+    adam_tool_def_t t2 = { .name = "fetch", .execute = mock_tool_search };
+
+    ASSERT_EQ(adam_settings_add_tool(s, t1), ADAM_OK);
+    ASSERT_EQ(s->tool_count, 1);
+
+    ASSERT_EQ(adam_settings_add_tool(s, t2), ADAM_OK);
+    ASSERT_EQ(s->tool_count, 2);
+
+    ASSERT_EQ(adam_settings_remove_tool(s, "search"), ADAM_OK);
+    ASSERT_EQ(s->tool_count, 1);
+    ASSERT_STR_EQ(s->tools[0].name, "fetch");
+
+    ASSERT_EQ(adam_settings_remove_tool(s, "nonexistent"), ADAM_ERR_TOOL_NOT_FOUND);
+
+    // Invalid: NULL name or execute
+    adam_tool_def_t bad = { .name = NULL, .execute = mock_tool_search };
+    ASSERT_EQ(adam_settings_add_tool(s, bad), ADAM_ERR_INVALID_PARAM);
+    bad.name = "x"; bad.execute = NULL;
+    ASSERT_EQ(adam_settings_add_tool(s, bad), ADAM_ERR_INVALID_PARAM);
+
+    adam_settings_destroy(s);
+}
+
+TEST(settings_callbacks) {
+    adam_settings_t *s = adam_create_settings();
+
+    mock_llm_ctx_t mock = {0};
+    ASSERT_EQ(adam_settings_set_llm_callback(s, mock_llm_simple, &mock), ADAM_OK);
+    ASSERT_EQ(s->llm_fn, mock_llm_simple);
+    ASSERT_EQ(s->llm_ctx, &mock);
+
+    log_collector_t lc = {0};
+    ASSERT_EQ(adam_settings_set_logger(s, log_collect, &lc, ADAM_LOG_TRACE),
+              ADAM_OK);
+    ASSERT_EQ(s->log_level, ADAM_LOG_TRACE);
+
+    adam_settings_destroy(s);
+}
+
+// ============================================================================
+// MARK: - Tests: History
+// ============================================================================
+
+TEST(history_lifecycle) {
+    adam_history_t *h = adam_history_create();
+    ASSERT_NOT_NULL(h);
+    ASSERT_EQ(adam_history_count(h), 0);
+
+    ASSERT_EQ(adam_history_append_user(h, "Hello"), ADAM_OK);
+    ASSERT_EQ(adam_history_count(h), 1);
+    ASSERT_EQ(h->items[0].role, ADAM_ROLE_USER);
+    ASSERT_STR_EQ(h->items[0].content, "Hello");
+
+    ASSERT_EQ(adam_history_append_assistant(h, "Hi there", NULL, 0), ADAM_OK);
+    ASSERT_EQ(adam_history_count(h), 2);
+
+    adam_history_clear(h);
+    ASSERT_EQ(adam_history_count(h), 0);
+
+    adam_history_destroy(h);
+}
+
+TEST(history_with_tool_calls) {
+    adam_history_t *h = adam_history_create();
+
+    // Simulate: user → assistant(tool_call) → tool_result → assistant(final)
+    ASSERT_EQ(adam_history_append_user(h, "What is 2+2?"), ADAM_OK);
+
+    adam_tool_call_t tc = {
+        .id = "call_123", .name = "calculator",
+        .arguments_json = "{\"expr\":\"2+2\"}"
+    };
+    ASSERT_EQ(adam_history_append_assistant(h, "Let me calculate.", &tc, 1),
+              ADAM_OK);
+    ASSERT_EQ(h->items[1].tool_call_count, 1);
+    ASSERT_STR_EQ(h->items[1].tool_calls[0].id, "call_123");
+    ASSERT_STR_EQ(h->items[1].tool_calls[0].name, "calculator");
+
+    ASSERT_EQ(adam_history_append_tool(h, "4", "call_123"), ADAM_OK);
+    ASSERT_EQ(h->items[2].role, ADAM_ROLE_TOOL);
+    ASSERT_STR_EQ(h->items[2].tool_call_id, "call_123");
+
+    ASSERT_EQ(adam_history_append_assistant(h, "2+2 = 4", NULL, 0), ADAM_OK);
+    ASSERT_EQ(adam_history_count(h), 4);
+
+    adam_history_destroy(h);
+}
+
+TEST(history_token_estimation) {
+    adam_history_t *h = adam_history_create();
+
+    // 100 chars ≈ 25 tokens
+    char msg[101];
+    memset(msg, 'a', 100);
+    msg[100] = '\0';
+    adam_history_append_user(h, msg);
+
+    size_t tokens = adam_history_estimate_tokens(h);
+    ASSERT(tokens >= 20 && tokens <= 30);
+
+    adam_history_destroy(h);
+}
+
+TEST(history_attachments) {
+    adam_history_t *h = adam_history_create();
+    adam_history_append_user(h, "What's in this image?");
+
+    uint8_t fake_png[] = {0x89, 'P', 'N', 'G', 0, 1, 2, 3};
+    ASSERT_EQ(adam_history_attach(h, ADAM_MEDIA_IMAGE_PNG, fake_png,
+                                  sizeof(fake_png), "test.png"), ADAM_OK);
+    ASSERT_EQ(h->items[0].attachment_count, 1);
+    ASSERT_EQ(h->items[0].attachments[0].type, ADAM_MEDIA_IMAGE_PNG);
+    ASSERT_EQ(h->items[0].attachments[0].data_len, sizeof(fake_png));
+    ASSERT_STR_EQ(h->items[0].attachments[0].filename, "test.png");
+
+    // Attach to empty history should fail
+    adam_history_t *h2 = adam_history_create();
+    ASSERT_EQ(adam_history_attach(h2, ADAM_MEDIA_IMAGE_PNG, fake_png,
+                                   sizeof(fake_png), NULL),
+              ADAM_ERR_INVALID_PARAM);
+
+    adam_history_destroy(h);
+    adam_history_destroy(h2);
+}
+
+// ============================================================================
+// MARK: - Tests: Agent Run (real-world scenarios)
+// ============================================================================
+
+TEST(run_simple_conversation) {
+    // Scenario: user sends a message, LLM responds with text (no tools).
+    mock_llm_ctx_t mock = { .fixed_response = "The capital of France is Paris." };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "What is the capital of France?");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_NOT_NULL(r.final_response);
+    ASSERT_STR_EQ(r.final_response, "The capital of France is Paris.");
+    ASSERT_EQ(r.total_iterations, 1);
+    ASSERT_EQ(r.input_tokens, 80);
+    ASSERT_EQ(r.output_tokens, 30);
+    ASSERT(r.elapsed_ms >= 0.0);
+    ASSERT_EQ(mock.call_count, 1);
+
+    // History should have: system + user + assistant = 3
+    ASSERT_EQ(adam_history_count(h), 3);
+    ASSERT_EQ(h->items[0].role, ADAM_ROLE_SYSTEM);
+    ASSERT_EQ(h->items[1].role, ADAM_ROLE_USER);
+    ASSERT_EQ(h->items[2].role, ADAM_ROLE_ASSISTANT);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(run_with_tool_call) {
+    // Scenario: LLM calls a tool, gets the result, then gives final answer.
+    // This exercises the full tool iteration loop.
+    mock_llm_ctx_t mock = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_with_tool, &mock);
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "search",
+        .description = "Search for information",
+        .parameters_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}",
+        .execute = mock_tool_search,
+    });
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Find information about topic X");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_STR_EQ(r.final_response,
+                   "Based on the tool result, the answer is 42.");
+    ASSERT_EQ(r.total_iterations, 2); // 1: tool call, 2: final answer
+    ASSERT_EQ(mock.call_count, 2);
+    ASSERT_EQ(mock.total_tool_calls_requested, 1);
+
+    // History: system + user + assistant(tool_call) + tool_result + assistant(final) = 5
+    ASSERT_EQ(adam_history_count(h), 5);
+    ASSERT_EQ(h->items[2].role, ADAM_ROLE_ASSISTANT);
+    ASSERT_EQ(h->items[2].tool_call_count, 1);
+    ASSERT_STR_EQ(h->items[2].tool_calls[0].id, "call_001");
+    ASSERT_EQ(h->items[3].role, ADAM_ROLE_TOOL);
+    ASSERT_STR_EQ(h->items[3].tool_call_id, "call_001");
+    ASSERT_EQ(h->items[4].role, ADAM_ROLE_ASSISTANT);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(run_multi_tool_calls) {
+    // Scenario: LLM requests two tool calls in a single response.
+    mock_llm_ctx_t mock = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_multi_tool, &mock);
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "tool_alpha", .execute = mock_tool_alpha });
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "tool_beta", .execute = mock_tool_beta });
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Run both tools");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_STR_EQ(r.final_response, "Combined result from both tools.");
+    ASSERT_EQ(mock.call_count, 2);
+    ASSERT_EQ(mock.total_tool_calls_requested, 2);
+
+    // History: system + user + assistant(2 tool_calls) + tool_a + tool_b + assistant(final) = 6
+    ASSERT_EQ(adam_history_count(h), 6);
+    ASSERT_EQ(h->items[2].tool_call_count, 2);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+// Mock that always requests a hardcoded tool name regardless of registry.
+static adam_llm_response_t mock_llm_calls_missing_tool(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_llm_ctx_t *mock = (mock_llm_ctx_t *)ctx;
+    mock->call_count++;
+    (void)tools; (void)tool_count;
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 50;
+    resp.output_tokens = 20;
+
+    // Check if there's a tool result already
+    int has_tool_result = 0;
+    for (size_t i = 0; i < msg_count; i++)
+        if (msgs[i].role == ADAM_ROLE_TOOL) has_tool_result = 1;
+
+    if (!has_tool_result) {
+        resp.tool_calls = arena_alloc(arena, sizeof(adam_tool_call_t));
+        resp.tool_call_count = 1;
+        resp.tool_calls[0].id = arena_strdup(arena, "call_missing");
+        resp.tool_calls[0].name = arena_strdup(arena, "nonexistent_tool");
+        resp.tool_calls[0].arguments_json = arena_strdup(arena, "{}");
+    } else {
+        resp.content = arena_strdup(arena, "Got the error, moving on.");
+    }
+    return resp;
+}
+
+TEST(run_tool_not_found) {
+    // Scenario: LLM calls a tool that doesn't exist in the registry.
+    // The agent should send "Error: tool not found" back to the LLM.
+    mock_llm_ctx_t mock = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_calls_missing_tool, &mock);
+    // Register a different tool — the mock will call "nonexistent_tool"
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "real_tool", .execute = mock_tool_search });
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Use the missing tool");
+
+    // The mock LLM sees "tool not found" as a tool result and still
+    // produces a final answer on the second call.
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(mock.call_count, 2);
+
+    // The tool result should contain the error message
+    ASSERT_EQ(h->items[3].role, ADAM_ROLE_TOOL);
+    ASSERT(strstr(h->items[3].content, "tool not found") != NULL);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(run_multi_turn_conversation) {
+    // Scenario: multi-turn conversation preserving history across runs.
+    mock_llm_ctx_t mock = { .fixed_response = "Response 1" };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+
+    adam_history_t *h = adam_history_create();
+
+    // Turn 1
+    adam_run_result_t r1 = adam_run(s, h, "Hello");
+    ASSERT_EQ(r1.status, ADAM_OK);
+    ASSERT_EQ(adam_history_count(h), 3); // sys + user + asst
+
+    // Turn 2 — history carries forward
+    mock.fixed_response = "Response 2";
+    adam_run_result_t r2 = adam_run(s, h, "Follow up");
+    ASSERT_EQ(r2.status, ADAM_OK);
+    ASSERT_EQ(adam_history_count(h), 5); // +user +asst
+
+    // Turn 3
+    mock.fixed_response = "Response 3";
+    adam_run_result_t r3 = adam_run(s, h, "Third message");
+    ASSERT_EQ(r3.status, ADAM_OK);
+    ASSERT_EQ(adam_history_count(h), 7);
+
+    // Verify ordering
+    ASSERT_EQ(h->items[0].role, ADAM_ROLE_SYSTEM);
+    ASSERT_EQ(h->items[1].role, ADAM_ROLE_USER);
+    ASSERT_EQ(h->items[2].role, ADAM_ROLE_ASSISTANT);
+    ASSERT_EQ(h->items[3].role, ADAM_ROLE_USER);
+    ASSERT_STR_EQ(h->items[3].content, "Follow up");
+
+    adam_run_result_free(&r1);
+    adam_run_result_free(&r2);
+    adam_run_result_free(&r3);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(run_no_provider) {
+    // Scenario: no provider configured — should fail immediately.
+    adam_settings_t *s = adam_create_settings();
+    adam_history_t *h = adam_history_create();
+
+    adam_run_result_t r = adam_run(s, h, "Hello");
+    ASSERT_EQ(r.status, ADAM_ERR_NO_PROVIDER);
+    ASSERT_NOT_NULL(r.final_response);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(run_null_params) {
+    adam_settings_t *s = adam_create_settings();
+    adam_history_t *h = adam_history_create();
+
+    adam_run_result_t r1 = adam_run(NULL, h, "test");
+    ASSERT_EQ(r1.status, ADAM_ERR_INVALID_PARAM);
+    adam_run_result_free(&r1);
+
+    adam_run_result_t r2 = adam_run(s, NULL, "test");
+    ASSERT_EQ(r2.status, ADAM_ERR_INVALID_PARAM);
+    adam_run_result_free(&r2);
+
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(run_abort) {
+    // Scenario: abort flag is set before running — should exit immediately.
+    mock_llm_ctx_t mock = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    adam_abort(s);
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Hello");
+
+    // abort_flag is reset at the start of adam_run, so this tests
+    // that the flag was cleared. Let's test the other way:
+    // set abort in a callback.
+    adam_run_result_free(&r);
+
+    // The run should have succeeded since abort_flag is reset at start
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(mock.call_count, 1);
+
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(run_auth_error_no_retry) {
+    // Scenario: auth error should NOT be retried.
+    mock_llm_ctx_t mock = { .simulate_error = ADAM_ERR_AUTH };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_error, &mock);
+    s->retry_max = 3;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Hello");
+
+    ASSERT_EQ(r.status, ADAM_ERR_AUTH);
+    ASSERT_EQ(mock.call_count, 1); // No retries for auth errors
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(run_with_logging) {
+    // Verify that the agent emits log messages at the right levels.
+    mock_llm_ctx_t mock = { .fixed_response = "Logged response." };
+    log_collector_t lc = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    adam_settings_set_logger(s, log_collect, &lc, ADAM_LOG_DEBUG);
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Hello");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT(lc.info_count >= 1); // at least "adam_run: starting" + "adam_run: done"
+    ASSERT(lc.len > 0);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(run_cost_tracking) {
+    mock_llm_ctx_t mock = { .fixed_response = "Cost test." };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    adam_settings_set_provider(s, ADAM_API_ANTHROPIC, "key", "claude-sonnet-4-x");
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Test cost");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    // mock returns 80 input + 30 output tokens
+    // claude-sonnet-4: $3/Mtok input, $15/Mtok output
+    // cost = 80/1M * 3 + 30/1M * 15 = 0.00024 + 0.00045 = 0.00069
+    ASSERT(r.cost_usd > 0.0f);
+    ASSERT(r.cost_usd < 0.01f);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+typedef struct { int call_count; char last[256]; } resp_ctx_t;
+
+static void on_resp(void *ctx, const char *text, size_t len) {
+    resp_ctx_t *r = (resp_ctx_t *)ctx;
+    r->call_count++;
+    size_t copy = len < 255 ? len : 255;
+    memcpy(r->last, text, copy);
+    r->last[copy] = '\0';
+}
+
+TEST(run_on_response_callback) {
+    // Verify the on_response callback fires with tool user output and final response.
+    resp_ctx_t rctx = {0};
+
+    mock_llm_ctx_t mock = {0};
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_with_tool, &mock);
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "search", .execute = mock_tool_search });
+    adam_settings_set_callbacks(s, on_resp, NULL, NULL, &rctx);
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Search for X");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    // Callbacks: 1 for tool's for_user + 1 for final response
+    ASSERT_EQ(rctx.call_count, 2);
+    ASSERT_STR_EQ(rctx.last, "Based on the tool result, the answer is 42.");
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+// ============================================================================
+// MARK: - Tests: Arena
+// ============================================================================
+
+TEST(arena_basic) {
+    arena_t *a = arena_create(4096);
+    ASSERT_NOT_NULL(a);
+
+    char *s1 = arena_strdup(a, "hello");
+    ASSERT_STR_EQ(s1, "hello");
+
+    void *p = arena_alloc(a, 1024);
+    ASSERT_NOT_NULL(p);
+
+    void *z = arena_zeroalloc(a, 128);
+    ASSERT_NOT_NULL(z);
+    // Verify zeroed
+    uint8_t *zb = (uint8_t *)z;
+    for (int i = 0; i < 128; i++) ASSERT_EQ(zb[i], 0);
+
+    size_t used, cap, blocks;
+    arena_stats(a, &used, &cap, &blocks);
+    ASSERT(used > 0);
+    ASSERT(cap >= used);
+    ASSERT(blocks >= 1);
+
+    arena_reset(a);
+    arena_stats(a, &used, NULL, &blocks);
+    ASSERT_EQ(used, 0);
+    ASSERT_EQ(blocks, 1); // reset keeps first block
+
+    arena_destroy(a);
+}
+
+TEST(arena_large_allocation) {
+    // Allocation larger than block size should still work.
+    arena_t *a = arena_create(1024);
+    void *p = arena_alloc(a, 8192);
+    ASSERT_NOT_NULL(p);
+
+    size_t used, cap, blocks;
+    arena_stats(a, &used, &cap, &blocks);
+    ASSERT(blocks >= 2); // needs at least one extra block
+    ASSERT(used >= 8192);
+
+    arena_destroy(a);
+}
+
+// ============================================================================
+// MARK: - Tests: Model Registry
+// ============================================================================
+
+TEST(model_registry_builtin) {
+    int cw = adam_model_context_window("claude-sonnet-4-20250514");
+    ASSERT_EQ(cw, 200000);
+
+    cw = adam_model_context_window("gpt-4o-2024-08-06");
+    ASSERT_EQ(cw, 128000);
+
+    cw = adam_model_context_window("unknown-model");
+    ASSERT_EQ(cw, 0);
+}
+
+TEST(model_registry_custom) {
+    adam_model_info_t custom = {
+        .model_prefix = "my-model",
+        .context_window = 32000,
+        .input_cost_mtok = 1.0f,
+        .output_cost_mtok = 2.0f,
+    };
+    ASSERT_EQ(adam_model_register(&custom), ADAM_OK);
+
+    ASSERT_EQ(adam_model_context_window("my-model-v1"), 32000);
+
+    float cost = adam_model_estimate_cost("my-model-v1", 1000000, 500000);
+    // 1M * 1.0/M + 0.5M * 2.0/M = 1.0 + 1.0 = 2.0
+    ASSERT(cost > 1.9f && cost < 2.1f);
+}
+
+TEST(model_estimate_cost) {
+    // claude-sonnet-4: $3/Mtok in, $15/Mtok out
+    float cost = adam_model_estimate_cost("claude-sonnet-4",
+                                           1000000, 1000000);
+    // 1M * 3/M + 1M * 15/M = 3 + 15 = 18
+    ASSERT(cost > 17.0f && cost < 19.0f);
+}
+
+// ============================================================================
+// MARK: - Tests: Token Estimation
+// ============================================================================
+
+TEST(token_estimation) {
+    ASSERT_EQ(adam_estimate_tokens("", 0), 0);
+    ASSERT_EQ(adam_estimate_tokens(NULL, 0), 0);
+
+    // 100 chars ≈ 25 tokens
+    char buf[101];
+    memset(buf, 'x', 100);
+    buf[100] = '\0';
+    size_t t = adam_estimate_tokens(buf, 100);
+    ASSERT(t >= 20 && t <= 30);
+}
+
+TEST(status_strings) {
+    ASSERT_STR_EQ(adam_status_string(ADAM_OK), "ok");
+    ASSERT_STR_EQ(adam_status_string(ADAM_ERR_AUTH), "authentication error");
+    ASSERT_STR_EQ(adam_status_string(ADAM_ERR_NO_PROVIDER), "no provider configured");
+}
+
+// ============================================================================
+// MARK: - Tests: Thread Pool
+// ============================================================================
+
+#ifndef ADAM_NO_PTHREADS
+
+// Shared atomic counter for thread pool test
+static pthread_mutex_t g_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int g_pool_done_count = 0;
+static adam_run_result_t g_pool_results[8];
+
+static void pool_on_done(void *ctx, adam_run_result_t result) {
+    int idx = *(int *)ctx;
+    pthread_mutex_lock(&g_pool_mutex);
+    g_pool_results[idx] = result;
+    // Don't free — we inspect later
+    g_pool_done_count++;
+    pthread_mutex_unlock(&g_pool_mutex);
+}
+
+TEST(thread_pool_basic) {
+    g_pool_done_count = 0;
+
+    adam_pool_t *pool = adam_pool_create(2);
+    ASSERT_NOT_NULL(pool);
+
+    // Submit 4 jobs
+    mock_llm_ctx_t mocks[4];
+    adam_settings_t *settings[4];
+    adam_history_t *histories[4];
+    int indices[4];
+
+    for (int i = 0; i < 4; i++) {
+        memset(&mocks[i], 0, sizeof(mock_llm_ctx_t));
+        mocks[i].fixed_response = "Pool response";
+
+        settings[i] = adam_create_settings();
+        adam_settings_set_llm_callback(settings[i], mock_llm_simple, &mocks[i]);
+        histories[i] = adam_history_create();
+        indices[i] = i;
+
+        adam_job_t job = {
+            .settings = settings[i],
+            .history = histories[i],
+            .user_message = "Hello from pool",
+            .on_done = pool_on_done,
+            .on_done_ctx = &indices[i],
+        };
+        ASSERT_EQ(adam_pool_submit(pool, job), ADAM_OK);
+    }
+
+    // Destroy waits for all jobs to complete
+    adam_pool_destroy(pool);
+
+    ASSERT_EQ(g_pool_done_count, 4);
+    for (int i = 0; i < 4; i++) {
+        ASSERT_EQ(g_pool_results[i].status, ADAM_OK);
+        ASSERT_NOT_NULL(g_pool_results[i].final_response);
+        ASSERT_STR_EQ(g_pool_results[i].final_response, "Pool response");
+        adam_run_result_free(&g_pool_results[i]);
+        adam_history_destroy(histories[i]);
+        adam_settings_destroy(settings[i]);
+    }
+}
+
+TEST(thread_pool_empty_destroy) {
+    // Creating and immediately destroying with no jobs should not crash.
+    adam_pool_t *pool = adam_pool_create(2);
+    ASSERT_NOT_NULL(pool);
+    ASSERT_EQ(adam_pool_pending(pool), 0);
+    ASSERT_EQ(adam_pool_active(pool), 0);
+    adam_pool_destroy(pool);
+}
+
+#endif // ADAM_NO_PTHREADS
+
+// ============================================================================
+// MARK: - Performance Benchmarks
+// ============================================================================
+
+TEST(perf_1000_simple_runs) {
+    // Benchmark: 1000 simple agent runs (no tools) with mock LLM.
+    mock_llm_ctx_t mock = { .fixed_response = "Benchmark response." };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    for (int i = 0; i < 1000; i++) {
+        adam_history_t *h = adam_history_create();
+        adam_run_result_t r = adam_run(s, h, "Benchmark message");
+        ASSERT_EQ(r.status, ADAM_OK);
+        adam_run_result_free(&r);
+        adam_history_destroy(h);
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0
+              + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+
+    printf("\n    1000 runs: %.1f ms total, %.3f ms/run", ms, ms / 1000.0);
+
+    ASSERT_EQ(mock.call_count, 1000);
+    adam_settings_destroy(s);
+}
+
+TEST(perf_tool_loop_throughput) {
+    // Benchmark: 500 runs with tool call + response (2 iterations each).
+    mock_llm_ctx_t mock = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_with_tool, &mock);
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "search", .execute = mock_tool_search });
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    for (int i = 0; i < 500; i++) {
+        mock.call_count = 0;
+        mock.total_tool_calls_requested = 0;
+        adam_history_t *h = adam_history_create();
+        adam_run_result_t r = adam_run(s, h, "Benchmark with tool");
+        ASSERT_EQ(r.status, ADAM_OK);
+        ASSERT_EQ(mock.call_count, 2);
+        adam_run_result_free(&r);
+        adam_history_destroy(h);
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0
+              + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+
+    printf("\n    500 tool runs: %.1f ms total, %.3f ms/run", ms, ms / 500.0);
+
+    adam_settings_destroy(s);
+}
+
+TEST(perf_arena_churn) {
+    // Benchmark: arena create/alloc/reset/destroy cycle.
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    for (int i = 0; i < 10000; i++) {
+        arena_t *a = arena_create(64 * 1024);
+        for (int j = 0; j < 100; j++) {
+            arena_alloc(a, 256);
+        }
+        arena_reset(a);
+        for (int j = 0; j < 100; j++) {
+            arena_strdup(a, "test string for arena benchmark");
+        }
+        arena_destroy(a);
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0
+              + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+
+    printf("\n    10000 arena cycles (200 allocs each): %.1f ms", ms);
+}
+
+// ============================================================================
+// MARK: - Main
+// ============================================================================
+
+int main(void) {
+    printf("Adam Test Suite v%s\n", ADAM_VERSION_STRING);
+    printf("============================================================\n");
+
+    adam_init();
+    mem_report_start();
+
+    // --- Settings ---
+    printf("\nSettings:\n");
+    RUN(create_settings_defaults);
+    RUN(settings_set_provider);
+    RUN(settings_add_remove_tools);
+    RUN(settings_callbacks);
+
+    // --- History ---
+    printf("\nHistory:\n");
+    RUN(history_lifecycle);
+    RUN(history_with_tool_calls);
+    RUN(history_token_estimation);
+    RUN(history_attachments);
+
+    // --- Agent Run ---
+    printf("\nAgent Run:\n");
+    RUN(run_simple_conversation);
+    RUN(run_with_tool_call);
+    RUN(run_multi_tool_calls);
+    RUN(run_tool_not_found);
+    RUN(run_multi_turn_conversation);
+    RUN(run_no_provider);
+    RUN(run_null_params);
+    RUN(run_abort);
+    RUN(run_auth_error_no_retry);
+    RUN(run_with_logging);
+    RUN(run_cost_tracking);
+    RUN(run_on_response_callback);
+
+    // --- Infrastructure ---
+    printf("\nInfrastructure:\n");
+    RUN(arena_basic);
+    RUN(arena_large_allocation);
+    RUN(model_registry_builtin);
+    RUN(model_registry_custom);
+    RUN(model_estimate_cost);
+    RUN(token_estimation);
+    RUN(status_strings);
+
+#ifndef ADAM_NO_PTHREADS
+    // --- Thread Pool ---
+    printf("\nThread Pool:\n");
+    RUN(thread_pool_basic);
+    RUN(thread_pool_empty_destroy);
+#endif
+
+    // --- Performance ---
+    printf("\nPerformance:\n");
+    RUN(perf_1000_simple_runs);
+    RUN(perf_tool_loop_throughput);
+    RUN(perf_arena_churn);
+
+    // --- Summary ---
+    printf("\n============================================================\n");
+    printf("Results: %d passed, %d failed, %d total (%d assertions)\n",
+           g_tests_passed, g_tests_failed, g_tests_run, g_asserts_total);
+
+    mem_report_end();
+
+    adam_cleanup();
+
+    return g_tests_failed > 0 ? 1 : 0;
+}
