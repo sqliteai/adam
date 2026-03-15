@@ -166,8 +166,12 @@ static adam_status_t cloud_stt(
                     }
                 }
             }
-            status = (http_code == 401 || http_code == 403 || http_code == 429)
-                     ? ADAM_ERR_AUTH : ADAM_ERR_VOICE;
+            if (http_code == 429)
+                status = ADAM_ERR_RATE_LIMIT;
+            else if (http_code == 401 || http_code == 403)
+                status = ADAM_ERR_AUTH;
+            else
+                status = ADAM_ERR_VOICE;
         }
     }
 
@@ -300,8 +304,12 @@ static adam_status_t cloud_tts(
         long http_code = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         if (http_code >= 400) {
-            status = (http_code == 401 || http_code == 403)
-                     ? ADAM_ERR_AUTH : ADAM_ERR_VOICE;
+            if (http_code == 429)
+                status = ADAM_ERR_RATE_LIMIT;
+            else if (http_code == 401 || http_code == 403)
+                status = ADAM_ERR_AUTH;
+            else
+                status = ADAM_ERR_VOICE;
         }
     }
 
@@ -330,6 +338,17 @@ static adam_status_t default_audio_play(
 }
 
 // ============================================================================
+// MARK: - Retry helper
+// ============================================================================
+
+#include <time.h>
+
+static void voice_sleep_ms(int ms) {
+    struct timespec ts = { .tv_sec = ms / 1000, .tv_nsec = (long)(ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+// ============================================================================
 // MARK: - Public API implementations
 // ============================================================================
 
@@ -348,12 +367,28 @@ adam_status_t adam_stt_transcribe(adam_settings_t *s, arena_t *arena,
     }
 
     switch (s->stt_backend) {
-    case ADAM_STT_CLOUD:
+    case ADAM_STT_CLOUD: {
 #ifndef ADAM_NO_CURL
-        return cloud_stt(s, arena, audio, audio_len, format, out_text);
+        // Retry with backoff on rate limit (429)
+        int backoff[] = {2000, 5000, 10000, 20000};
+        int max_retries = 4;
+        adam_status_t rc = ADAM_OK;
+        for (int attempt = 0; attempt <= max_retries; attempt++) {
+            rc = cloud_stt(s, arena, audio, audio_len, format, out_text);
+            if (rc != ADAM_ERR_AUTH && rc != ADAM_ERR_RATE_LIMIT) return rc;
+            if (rc == ADAM_OK) return rc;
+            if (attempt == max_retries) return rc;
+            int delay = backoff[attempt < 4 ? attempt : 3];
+            fprintf(stderr, "  [STT] rate limited, retrying in %dms (%d/%d)\n",
+                    delay, attempt + 1, max_retries);
+            voice_sleep_ms(delay);
+            *out_text = NULL;  // reset for retry
+        }
+        return rc;
 #else
         return ADAM_ERR_NOT_IMPLEMENTED;
 #endif
+    }
 
     case ADAM_STT_LOCAL:
         return ADAM_ERR_NOT_IMPLEMENTED;
@@ -379,12 +414,27 @@ adam_status_t adam_tts_synthesize(adam_settings_t *s, arena_t *arena,
     }
 
     switch (s->tts_backend) {
-    case ADAM_TTS_CLOUD:
+    case ADAM_TTS_CLOUD: {
 #ifndef ADAM_NO_CURL
-        return cloud_tts(s, arena, text, out_audio, out_len);
+        int backoff[] = {2000, 5000, 10000, 20000};
+        int max_retries = 4;
+        adam_status_t rc = ADAM_OK;
+        for (int attempt = 0; attempt <= max_retries; attempt++) {
+            rc = cloud_tts(s, arena, text, out_audio, out_len);
+            if (rc != ADAM_ERR_RATE_LIMIT) return rc;
+            if (attempt == max_retries) return rc;
+            int delay = backoff[attempt < 4 ? attempt : 3];
+            fprintf(stderr, "  [TTS] rate limited, retrying in %dms (%d/%d)\n",
+                    delay, attempt + 1, max_retries);
+            voice_sleep_ms(delay);
+            *out_audio = NULL;
+            *out_len = 0;
+        }
+        return rc;
 #else
         return ADAM_ERR_NOT_IMPLEMENTED;
 #endif
+    }
 
     case ADAM_TTS_LOCAL:
         return ADAM_ERR_NOT_IMPLEMENTED;
