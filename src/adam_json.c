@@ -113,6 +113,7 @@ static int tok_eq(const char *json, const jsmntok_t *tok, const char *s) {
          && memcmp(json + tok->start, s, slen) == 0);
 }
 
+// Extract a raw token value (no JSON unescaping — for keys, IDs, names)
 static const char *tok_str(arena_t *arena, const char *json, const jsmntok_t *tok) {
     size_t len = (size_t)(tok->end - tok->start);
     char *s = arena_alloc(arena, len + 1);
@@ -120,6 +121,40 @@ static const char *tok_str(arena_t *arena, const char *json, const jsmntok_t *to
     memcpy(s, json + tok->start, len);
     s[len] = '\0';
     return s;
+}
+
+// Extract a string token with JSON unescaping (for content text)
+static const char *tok_str_unesc(arena_t *arena, const char *json, const jsmntok_t *tok) {
+    size_t src_len = (size_t)(tok->end - tok->start);
+    const char *src = json + tok->start;
+    // Output can only be shorter or equal
+    char *dst = arena_alloc(arena, src_len + 1);
+    if (!dst) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < src_len; i++) {
+        if (src[i] == '\\' && i + 1 < src_len) {
+            i++;
+            switch (src[i]) {
+            case '"':  dst[j++] = '"';  break;
+            case '\\': dst[j++] = '\\'; break;
+            case '/':  dst[j++] = '/';  break;
+            case 'b':  dst[j++] = '\b'; break;
+            case 'f':  dst[j++] = '\f'; break;
+            case 'n':  dst[j++] = '\n'; break;
+            case 'r':  dst[j++] = '\r'; break;
+            case 't':  dst[j++] = '\t'; break;
+            case 'u':
+                // \uXXXX — for now, pass through as-is for non-ASCII
+                dst[j++] = '\\'; dst[j++] = 'u';
+                break;
+            default:   dst[j++] = src[i]; break;
+            }
+        } else {
+            dst[j++] = src[i];
+        }
+    }
+    dst[j] = '\0';
+    return dst;
 }
 
 static int tok_int(const char *json, const jsmntok_t *tok) {
@@ -198,14 +233,15 @@ static void build_anthropic(
             // Assistant message with tool calls
             abuf_fmt(b, "{\"role\":\"%s\",\"content\":[", role);
             // Text content first (if any)
-            if (msgs[i].content_len > 0) {
+            int has_text = (msgs[i].content_len > 0);
+            if (has_text) {
                 abuf_str(b, "{\"type\":\"text\",\"text\":");
                 abuf_json_string(b, msgs[i].content, msgs[i].content_len);
-                abuf_str(b, "},");
+                abuf_char(b, '}');
             }
             // Tool use blocks
             for (size_t t = 0; t < msgs[i].tool_call_count; t++) {
-                if (t > 0 || msgs[i].content_len > 0) abuf_char(b, ',');
+                if (t > 0 || has_text) abuf_char(b, ',');
                 abuf_str(b, "{\"type\":\"tool_use\",\"id\":");
                 abuf_json_cstr(b, msgs[i].tool_calls[t].id);
                 abuf_str(b, ",\"name\":");
@@ -411,7 +447,7 @@ static adam_llm_response_t parse_anthropic(
             // Find error.message
             for (int j = i; j < ntok - 1; j++) {
                 if (tok_eq(json, &tokens[j], "message") && tokens[j+1].type == JSMN_STRING) {
-                    resp.error_msg = tok_str(arena, json, &tokens[j+1]);
+                    resp.error_msg = tok_str_unesc(arena, json, &tokens[j+1]);
                     return resp;
                 }
             }
@@ -447,7 +483,7 @@ static adam_llm_response_t parse_anthropic(
                         block_type = tok_str(arena, json, &tokens[k+1]);
                         k += 2;
                     } else if (tok_eq(json, &tokens[k], "text")) {
-                        block_text = tok_str(arena, json, &tokens[k+1]);
+                        block_text = tok_str_unesc(arena, json, &tokens[k+1]);
                         k += 2;
                     } else if (tok_eq(json, &tokens[k], "id")) {
                         tc_id = tok_str(arena, json, &tokens[k+1]);
@@ -557,7 +593,7 @@ static adam_llm_response_t parse_openai(
             int obj_size = tokens[i+1].size;
             for (int f = 0; f < obj_size && k < ntok - 1; f++) {
                 if (tok_eq(json, &tokens[k], "message") && tokens[k+1].type == JSMN_STRING) {
-                    resp.error_msg = tok_str(arena, json, &tokens[k+1]);
+                    resp.error_msg = tok_str_unesc(arena, json, &tokens[k+1]);
                     return resp;
                 }
                 k++;
@@ -591,7 +627,7 @@ static adam_llm_response_t parse_openai(
                     for (int mf = 0; mf < msg_size && m < ntok - 1; mf++) {
                         if (tok_eq(json, &tokens[m], "content")) {
                             if (tokens[m+1].type == JSMN_STRING) {
-                                resp.content = tok_str(arena, json, &tokens[m+1]);
+                                resp.content = tok_str_unesc(arena, json, &tokens[m+1]);
                             }
                             m += 2;
                         } else if (tok_eq(json, &tokens[m], "tool_calls") && tokens[m+1].type == JSMN_ARRAY) {
