@@ -133,11 +133,16 @@ int main(void) {
         return 1;
     }
 
-    // Pick LLM provider
+    // Pick LLM provider — prefer fastest for voice conversation
     const char *llm_key, *llm_model, *llm_url = NULL;
     adam_api_format_t llm_fmt;
 
-    if (grok_key) {
+    if (openai_key) {
+        // GPT-4o-mini is the fastest for short conversational replies
+        llm_key = openai_key;
+        llm_model = "gpt-4o-mini";
+        llm_fmt = ADAM_API_OPENAI;
+    } else if (grok_key) {
         llm_key = grok_key;
         llm_model = "grok-3-mini-fast";
         llm_url = "https://api.x.ai/v1/chat/completions";
@@ -167,6 +172,7 @@ int main(void) {
         "Do not use markdown, bullet points, or code. "
         "Speak naturally as if in a real conversation.");
 
+    s->max_tokens = 150;  // voice replies should be short
     adam_settings_set_logger(s, on_log, NULL, ADAM_LOG_WARN);
 
     // STT: OpenAI Whisper
