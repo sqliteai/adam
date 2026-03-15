@@ -140,39 +140,61 @@ static adam_status_t cloud_stt(
 
     CURLcode res = curl_easy_perform(curl);
     adam_status_t status = ADAM_OK;
+    long http_code = 0;
 
     if (res != CURLE_OK) {
         status = ADAM_ERR_CURL;
     } else {
-        long http_code = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         if (http_code >= 400) {
-            status = (http_code == 401 || http_code == 403)
+            // Extract error message from JSON response for better diagnostics
+            if (write_ctx.buf) {
+                const char *msg = strstr(write_ctx.buf, "\"message\"");
+                if (msg) {
+                    msg = strchr(msg + 9, '"');
+                    if (msg) {
+                        msg++;
+                        const char *end = strchr(msg, '"');
+                        if (end) {
+                            size_t mlen = (size_t)(end - msg);
+                            char *err = arena_alloc(arena, mlen + 32);
+                            snprintf(err, mlen + 32, "STT error (HTTP %ld): %.*s",
+                                     http_code, (int)mlen, msg);
+                            // Store as out_text so caller can see the error
+                            fprintf(stderr, "  [STT] %s\n", err);
+                        }
+                    }
+                }
+            }
+            status = (http_code == 401 || http_code == 403 || http_code == 429)
                      ? ADAM_ERR_AUTH : ADAM_ERR_VOICE;
         }
     }
 
     if (status == ADAM_OK && write_ctx.buf) {
-        // Parse {"text": "..."} — simple extraction
-        const char *p = strstr(write_ctx.buf, "\"text\"");
-        if (p) {
-            p = strchr(p + 5, ':');
-            if (p) {
-                // Skip whitespace and opening quote
-                p++;
-                while (*p == ' ' || *p == '\t') p++;
-                if (*p == '"') {
-                    p++;
-                    const char *end = p;
-                    // Find closing quote (handle escaped quotes)
+        // Parse {"text": "..."} — find the "text" key specifically
+        // (not "type" or "text_tokens" etc.)
+        const char *p = write_ctx.buf;
+        while ((p = strstr(p, "\"text\"")) != NULL) {
+            // Verify this is a top-level key by checking what's after the value
+            const char *colon = p + 6;
+            while (*colon == ' ' || *colon == '\t') colon++;
+            if (*colon == ':') {
+                colon++;
+                while (*colon == ' ' || *colon == '\t' || *colon == '\n') colon++;
+                if (*colon == '"') {
+                    colon++;
+                    const char *end = colon;
                     while (*end && !(*end == '"' && *(end-1) != '\\')) end++;
-                    size_t tlen = (size_t)(end - p);
+                    size_t tlen = (size_t)(end - colon);
                     char *text = arena_alloc(arena, tlen + 1);
-                    memcpy(text, p, tlen);
+                    memcpy(text, colon, tlen);
                     text[tlen] = '\0';
                     *out_text = text;
+                    break;
                 }
             }
+            p++;
         }
         if (!*out_text) status = ADAM_ERR_JSON;
     }
