@@ -53,7 +53,7 @@ OBJS := $(SRCS:.c=.o)
 # Targets
 # ============================================================================
 
-.PHONY: all clean test live voice deps mbedtls curl
+.PHONY: all clean test live voice talk deps mbedtls curl
 
 all: libadam.a
 
@@ -90,6 +90,15 @@ test_voice_interactive: libadam.a test/test_voice_interactive.c
 		-L. -ladam $(LIBS) $(LDFLAGS) \
 		-o $@
 
+talk: test_voice_talk
+	./test_voice_talk
+
+test_voice_talk: libadam.a test/test_voice_talk.c
+	$(CC) $(CFLAGS) -g \
+		test/test_voice_talk.c \
+		-L. -ladam $(LIBS) $(LDFLAGS) \
+		-o $@
+
 # --- Dependencies ---
 
 deps: mbedtls curl
@@ -118,5 +127,5 @@ curl: mbedtls
 # --- Clean ---
 
 clean:
-	rm -f $(OBJS) libadam.a test_adam test_live test_voice_interactive
-	rm -rf test_adam.dSYM test_live.dSYM test_voice_interactive.dSYM
+	rm -f $(OBJS) libadam.a test_adam test_live test_voice_interactive test_voice_talk
+	rm -rf test_adam.dSYM test_live.dSYM test_voice_interactive.dSYM test_voice_talk.dSYM

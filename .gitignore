@@ -7,6 +7,7 @@
 test_adam
 test_live
 test_voice_interactive
+test_voice_talk
 adam
 
 # Secrets
