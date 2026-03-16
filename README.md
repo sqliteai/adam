@@ -3373,8 +3373,30 @@ ALTER TABLE messages ADD COLUMN device_id TEXT;
 
 libadam.a compiles for mobile with the same source:
 
+The mobile app uses **Expo** (React Native) for a single codebase on both iOS and Android. libadam.a is exposed to JavaScript via an Expo native module (C → Obj-C/Java bridge → JS).
+
+```
+mobile/
+├── app/                    # Expo Router screens
+│   ├── (tabs)/
+│   │   ├── chat.tsx        # Chat interface
+│   │   ├── sessions.tsx    # Session picker
+│   │   └── settings.tsx    # Model, voice, sync settings
+│   └── _layout.tsx
+├── modules/
+│   └── adam/               # Expo native module wrapping libadam
+│       ├── ios/            # Obj-C bridge → libadam.a (arm64-ios)
+│       ├── android/        # JNI bridge → libadam.so (arm64-android)
+│       └── src/
+│           └── index.ts    # TypeScript API: Adam.run(), Adam.speak(), etc.
+├── package.json
+└── app.json
+```
+
+**Building libadam for mobile:**
+
 ```makefile
-# iOS (arm64)
+# iOS (arm64) — used by the Expo native module
 xcrun -sdk iphoneos cc -arch arm64 -std=c11 -O2 \
     -DADAM_NO_LOCAL -DADAM_NO_CURL \
     -Isrc -Imodules/sqlite -Imodules/miniaudio \
@@ -3382,7 +3404,7 @@ xcrun -sdk iphoneos cc -arch arm64 -std=c11 -O2 \
       src/adam_voice.c src/adam_audio.c src/adam_session.c \
       src/adam_net_apple.m modules/sqlite/sqlite3.c
 
-# Android (arm64, via NDK)
+# Android (arm64) — used by the Expo native module via JNI
 $NDK/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android34-clang \
     -std=c11 -O2 -DADAM_NO_LOCAL \
     -Isrc -Imodules/sqlite -Imodules/miniaudio \
@@ -3391,9 +3413,24 @@ $NDK/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android34-clang \
       src/adam_net_curl.c modules/sqlite/sqlite3.c
 ```
 
-**Platform bindings:**
-- **iOS**: Swift calls C via bridging header. NSURLSession for HTTP (already in adam_net_apple.m). AVAudioSession for mic permissions.
-- **Android**: Kotlin calls C via JNI. OkHttp or the curl-based adam_net_curl.c for HTTP. MediaRecorder for mic.
+**Expo native module bridge** (TypeScript API):
+
+```typescript
+// modules/adam/src/index.ts
+import AdamModule from './AdamModule';
+
+export function createSettings(): number { return AdamModule.createSettings(); }
+export function setProvider(handle: number, format: number, key: string, model: string): void { ... }
+export function run(handle: number, historyHandle: number, message: string): Promise<RunResult> { ... }
+export function speak(handle: number, text: string): Promise<void> { ... }
+export function sessionSave(sessHandle: number, id: string, histHandle: number): void { ... }
+export function sessionLoad(sessHandle: number, id: string, histHandle: number): void { ... }
+export function sync(sessHandle: number): Promise<void> { ... }
+```
+
+The Expo native module wraps libadam's C API:
+- **iOS**: Objective-C calls C functions directly (same process, no bridging overhead)
+- **Android**: JNI calls C functions via `libadamjni.so` (thin JNI wrapper around libadam)
 
 ### 20.6 Mobile Chat UI
 
@@ -3439,12 +3476,13 @@ Minimal chat interface wrapping the C API:
 - [ ] Add `adam_documents_read()` / `adam_documents_write()` API
 - [ ] Modify `build_system_prompt()` to read bootstrap files from `documents` table
 - [ ] Modify evolution loop to use `documents` table instead of filesystem
-- [ ] Create iOS Xcode project with Swift bridging header
-- [ ] Create Android project with JNI bindings
-- [ ] Build libadam.a for arm64-ios and arm64-android
-- [ ] Implement chat UI (SwiftUI for iOS, Jetpack Compose for Android)
-- [ ] Add mic permission handling and audio session management
-- [ ] Add sync trigger on app foreground / background transitions
-- [ ] Add session picker and sync status indicator
+- [ ] Create Expo project with React Native
+- [ ] Create Expo native module wrapping libadam (Obj-C for iOS, JNI for Android)
+- [ ] Build libadam.a for arm64-ios and libadam.so for arm64-android
+- [ ] Implement chat UI in React Native (message list, text input, mic button)
+- [ ] Expose Adam.run(), Adam.speak(), Adam.sessionSave/Load/List() to TypeScript
+- [ ] Add mic permission handling via expo-av
+- [ ] Add sync trigger on AppState change (foreground/background)
+- [ ] Add session picker screen and sync status indicator
 - [ ] Test offline-first: create session on device A offline, sync to device B
 - [ ] Test concurrent edits: both devices modify same session, verify CRDT merge
