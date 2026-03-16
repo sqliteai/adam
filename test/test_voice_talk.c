@@ -27,6 +27,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <unistd.h>
+#include <sys/select.h>
 #include <pthread.h>
 
 // ============================================================================
@@ -73,12 +75,37 @@ static volatile int g_stop_recording = 0;
 
 static void *enter_thread_fn(void *arg) {
     UNUSED_PARAM(arg);
-    getchar();
+    // Wait for a real Enter keypress (ignore leftover chars in stdin)
+    int c;
+    do { c = getchar(); } while (c != '\n' && c != EOF);
     g_stop_recording = 1;
     return NULL;
 }
 
+// Flush any leftover characters in stdin (from previous turns)
+static void flush_stdin(void) {
+    // Set non-blocking temporarily to drain without waiting
+    // Simple approach: just clear the terminal input buffer
+    // On most systems, this discards pending input
+    int c;
+    // Use select/poll to check if stdin has data without blocking
+    fd_set fds;
+    struct timeval tv = {0, 0}; // immediate
+    FD_ZERO(&fds);
+    FD_SET(STDIN_FILENO, &fds);
+    while (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0) {
+        c = getchar();
+        if (c == EOF) break;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        tv = (struct timeval){0, 0};
+    }
+}
+
 static uint8_t *record_speech(size_t *out_len) {
+    // Flush any leftover stdin from previous turn
+    flush_stdin();
+
     g_stop_recording = 0;
 
     pthread_t tid;
@@ -220,7 +247,14 @@ int main(int argc, char **argv) {
         llm_str = gguf;
 
         // STT: whisper.cpp
-        const char *whisper = find_whisper(argc, argv, "models/ggml-base.en.bin");
+        // Prefer multilingual model (supports all languages)
+        // Fall back to English-only if multilingual not found
+        const char *whisper = find_whisper(argc, argv, NULL);
+        if (!whisper) {
+            FILE *f = fopen("models/ggml-base.bin", "r");
+            if (f) { fclose(f); whisper = "models/ggml-base.bin"; }
+            else whisper = "models/ggml-base.en.bin";
+        }
         adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, whisper);
         stt_str = whisper;
 
