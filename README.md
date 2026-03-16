@@ -419,7 +419,8 @@ Adam/
 │   ├── adam_memory.c        # Persistent memory (SQLite + sqlite-memory + sqlite-vector)
 │   ├── adam_session.c       # Session persistence (SQLite-backed)
 │   ├── adam_stream.c        # Streaming responses (SSE + llama.cpp tokens)
-│   ├── adam_context.c       # System prompt builder + memory enrichment
+│   ├── # adam_context.c is NOT a separate file — system prompt building
+│   ├── # and memory enrichment live in build_system_prompt() inside adam.c
 │   ├── adam_evolution.c     # Evolution loop + parallel workers
 │   ├── adam_tools.c         # Built-in tool implementations
 │   ├── adam_log.c           # Logging subsystem
@@ -1522,7 +1523,7 @@ LDFLAGS = deps/curl/lib/libcurl.a \
 
 SRCS = src/arena.c src/adam.c src/adam_json.c src/adam_http.c \
        src/adam_local.c src/adam_memory.c src/adam_session.c \
-       src/adam_stream.c src/adam_context.c src/adam_evolution.c \
+       src/adam_stream.c src/adam_evolution.c \
        src/adam_tools.c src/adam_log.c \
        deps/sqlite/sqlite3.c
 
@@ -2390,11 +2391,13 @@ static AdamLLMResponse dispatch_llm_call(
 Before each agent turn, Adam automatically enriches the system prompt with relevant memories:
 
 ```c
-/* === adam_context.c === */
+/* === Inside adam.c: build_system_prompt() === */
+/* NOTE: This is NOT a separate file. System prompt building and memory
+ * enrichment live in the static build_system_prompt() function inside
+ * adam.c. When adam_memory.c is implemented, the memory enrichment
+ * block below will be uncommented in that existing function. */
 
-/* Build the system prompt with memory enrichment.
- * Called at the start of each agent turn. */
-const char *adam_build_system_prompt(
+const char *build_system_prompt(
     arena_t *arena,
     const AdamSystemPrompt *sp,
     adam_memory_t *memory,
