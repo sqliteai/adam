@@ -73,50 +73,46 @@ static void on_log(void *ctx, adam_log_level_t level,
 
 static volatile int g_stop_recording = 0;
 
+// Wait for Enter by polling stdin — no pthread_cancel needed.
+// The thread checks g_stop_recording periodically and exits cleanly.
 static void *enter_thread_fn(void *arg) {
     UNUSED_PARAM(arg);
-    // Wait for a real Enter keypress (ignore leftover chars in stdin)
-    int c;
-    do { c = getchar(); } while (c != '\n' && c != EOF);
-    g_stop_recording = 1;
+    while (!g_stop_recording) {
+        fd_set fds;
+        struct timeval tv = {0, 100000}; // 100ms poll interval
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        if (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0) {
+            int c = getchar();
+            if (c == '\n' || c == EOF) {
+                g_stop_recording = 1;
+                return NULL;
+            }
+        }
+    }
     return NULL;
 }
 
-// Flush any leftover characters in stdin (from previous turns)
-static void flush_stdin(void) {
-    // Set non-blocking temporarily to drain without waiting
-    // Simple approach: just clear the terminal input buffer
-    // On most systems, this discards pending input
-    int c;
-    // Use select/poll to check if stdin has data without blocking
-    fd_set fds;
-    struct timeval tv = {0, 0}; // immediate
-    FD_ZERO(&fds);
-    FD_SET(STDIN_FILENO, &fds);
-    while (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0) {
-        c = getchar();
-        if (c == EOF) break;
-        FD_ZERO(&fds);
-        FD_SET(STDIN_FILENO, &fds);
-        tv = (struct timeval){0, 0};
-    }
-}
-
 static uint8_t *record_speech(size_t *out_len) {
-    // Flush any leftover stdin from previous turn
-    flush_stdin();
-
     g_stop_recording = 0;
 
+    int is_tty = isatty(STDIN_FILENO);
     pthread_t tid;
-    pthread_create(&tid, NULL, enter_thread_fn, NULL);
 
-    printf("    Listening... (press Enter when done speaking)\n");
-    uint8_t *wav = adam_audio_record(16000, 30, &g_stop_recording, out_len);
+    if (is_tty) {
+        // Interactive: Enter key stops recording
+        pthread_create(&tid, NULL, enter_thread_fn, NULL);
+        printf("    Listening... (press Enter when done speaking)\n");
+    } else {
+        // Non-interactive (piped): use 5s timeout only
+        printf("    Listening... (5s timeout)\n");
+    }
+
+    int max_seconds = is_tty ? 30 : 5;
+    uint8_t *wav = adam_audio_record(16000, max_seconds, &g_stop_recording, out_len);
 
     g_stop_recording = 1;
-    pthread_cancel(tid);
-    pthread_join(tid, NULL);
+    if (is_tty) pthread_join(tid, NULL);
 
     return wav;
 }
