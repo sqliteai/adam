@@ -236,11 +236,11 @@ adam_net_response_t adam_net_post_multipart(
 // ============================================================================
 
 @interface AdamStreamDelegate : NSObject <NSURLSessionDataDelegate>
-@property (nonatomic) adam_net_stream_fn callback;
-@property (nonatomic) void *callbackCtx;
-@property (nonatomic) long httpCode;
-@property (nonatomic) int error;
-@property (nonatomic) dispatch_semaphore_t semaphore;
+@property (nonatomic, assign) adam_net_stream_fn callback;
+@property (nonatomic, assign) void *callbackCtx;
+@property (nonatomic, assign) long httpCode;
+@property (nonatomic, assign) int error;
+@property (nonatomic, strong) dispatch_semaphore_t semaphore;
 @end
 
 @implementation AdamStreamDelegate
