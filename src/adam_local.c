@@ -201,12 +201,17 @@ adam_llm_response_t adam_llm_call_local(
     // Clear KV cache for fresh generation
     llama_memory_clear(llama_get_memory(lctx->ctx), true);
 
-    // Decode prompt
-    struct llama_batch batch = llama_batch_get_one(tokens, n_prompt);
-    if (llama_decode(lctx->ctx, batch) != 0) {
-        resp.error = ADAM_ERR_LOCAL;
-        resp.error_msg = arena_strdup(arena, "prompt decode failed");
-        return resp;
+    // Decode prompt in batches (prompt may exceed n_batch)
+    int n_batch = s->local_batch_size > 0 ? s->local_batch_size : 512;
+    for (int i = 0; i < n_prompt; i += n_batch) {
+        int n_chunk = n_prompt - i;
+        if (n_chunk > n_batch) n_chunk = n_batch;
+        struct llama_batch batch = llama_batch_get_one(tokens + i, n_chunk);
+        if (llama_decode(lctx->ctx, batch) != 0) {
+            resp.error = ADAM_ERR_LOCAL;
+            resp.error_msg = arena_strdup(arena, "prompt decode failed");
+            return resp;
+        }
     }
 
     // Generate tokens one by one
@@ -259,9 +264,9 @@ adam_llm_response_t adam_llm_call_local(
         // Abort check
         if (s->abort_flag) break;
 
-        // Prepare next decode
-        batch = llama_batch_get_one(&new_token, 1);
-        if (llama_decode(lctx->ctx, batch) != 0) break;
+        // Prepare next decode (single token)
+        struct llama_batch next = llama_batch_get_one(&new_token, 1);
+        if (llama_decode(lctx->ctx, next) != 0) break;
     }
 
     output[out_len] = '\0';
