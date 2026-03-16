@@ -439,6 +439,11 @@ static adam_status_t history_grow(adam_history_t *h) {
     return ADAM_OK;
 }
 
+// Safe strdup: returns empty string on NULL input, returns NULL only on OOM
+static char *safe_strdup(const char *s) {
+    return strdup(s ? s : "");
+}
+
 adam_status_t adam_history_append_user(adam_history_t *h, const char *content) {
     if (!h || !content) return ADAM_ERR_INVALID_PARAM;
     adam_status_t rc = history_grow(h);
@@ -448,7 +453,8 @@ adam_status_t adam_history_append_user(adam_history_t *h, const char *content) {
     memset(m, 0, sizeof(*m));
     m->role = ADAM_ROLE_USER;
     m->content = strdup(content);
-    m->content_len = strlen(content);
+    if (!m->content) { h->count--; return ADAM_ERR_ALLOC; }
+    m->content_len = strlen(m->content);
     return ADAM_OK;
 }
 
@@ -463,21 +469,21 @@ adam_status_t adam_history_append_assistant(adam_history_t *h,
     adam_message_t *m = &h->items[h->count++];
     memset(m, 0, sizeof(*m));
     m->role = ADAM_ROLE_ASSISTANT;
-    m->content = strdup(content ? content : "");
+    m->content = safe_strdup(content);
+    if (!m->content) { h->count--; return ADAM_ERR_ALLOC; }
     m->content_len = strlen(m->content);
 
     if (tool_call_count > 0 && tool_calls) {
-        m->tool_calls = malloc(tool_call_count * sizeof(adam_tool_call_entry_t));
-        if (!m->tool_calls) return ADAM_ERR_ALLOC;
+        m->tool_calls = calloc(tool_call_count, sizeof(adam_tool_call_entry_t));
+        if (!m->tool_calls) { h->count--; return ADAM_ERR_ALLOC; }
         m->tool_call_count = tool_call_count;
         for (size_t i = 0; i < tool_call_count; i++) {
-            m->tool_calls[i].id =
-                tool_calls[i].id ? strdup(tool_calls[i].id) : NULL;
-            m->tool_calls[i].name =
-                tool_calls[i].name ? strdup(tool_calls[i].name) : NULL;
-            m->tool_calls[i].arguments_json =
-                tool_calls[i].arguments_json
-                    ? strdup(tool_calls[i].arguments_json) : NULL;
+            if (tool_calls[i].id)
+                m->tool_calls[i].id = strdup(tool_calls[i].id);
+            if (tool_calls[i].name)
+                m->tool_calls[i].name = strdup(tool_calls[i].name);
+            if (tool_calls[i].arguments_json)
+                m->tool_calls[i].arguments_json = strdup(tool_calls[i].arguments_json);
         }
     }
     return ADAM_OK;
@@ -494,7 +500,8 @@ adam_status_t adam_history_append_tool(adam_history_t *h,
     memset(m, 0, sizeof(*m));
     m->role = ADAM_ROLE_TOOL;
     m->content = strdup(content);
-    m->content_len = strlen(content);
+    if (!m->content) { h->count--; return ADAM_ERR_ALLOC; }
+    m->content_len = strlen(m->content);
     m->tool_call_id = tool_call_id ? strdup(tool_call_id) : NULL;
     return ADAM_OK;
 }
@@ -885,13 +892,13 @@ adam_run_result_t adam_run(adam_settings_t *s, adam_history_t *history,
                 history->count * sizeof(adam_message_t));
         memset(&history->items[0], 0, sizeof(adam_message_t));
         history->items[0].role = ADAM_ROLE_SYSTEM;
-        history->items[0].content = strdup(sys_prompt ? sys_prompt : "");
+        history->items[0].content = safe_strdup(sys_prompt);
         history->items[0].content_len = strlen(history->items[0].content);
         history->count++;
     } else {
         // Update existing system message
         free(history->items[0].content);
-        history->items[0].content = strdup(sys_prompt ? sys_prompt : "");
+        history->items[0].content = safe_strdup(sys_prompt);
         history->items[0].content_len = strlen(history->items[0].content);
     }
 

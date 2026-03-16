@@ -63,11 +63,16 @@ adam_status_t adam_audio_play_miniaudio(
     }
 
     char tmppath[256];
-    snprintf(tmppath, sizeof(tmppath), "/tmp/adam_play_%d.%s", (int)getpid(), ext);
+    snprintf(tmppath, sizeof(tmppath), "/tmp/adam_play_%d_%lx.%s",
+             (int)getpid(), (unsigned long)audio_len, ext);
 
     FILE *f = fopen(tmppath, "wb");
     if (!f) return ADAM_ERR_VOICE;
-    fwrite(audio_data, 1, audio_len, f);
+    if (fwrite(audio_data, 1, audio_len, f) != audio_len) {
+        fclose(f);
+        remove(tmppath);
+        return ADAM_ERR_VOICE;
+    }
     fclose(f);
 
     // Decode and play
@@ -83,12 +88,6 @@ adam_status_t adam_audio_play_miniaudio(
     config.playback.format   = decoder.outputFormat;
     config.playback.channels = decoder.outputChannels;
     config.sampleRate        = decoder.outputSampleRate;
-
-    // Playback state
-    typedef struct {
-        ma_decoder *decoder;
-        volatile int done;
-    } playback_ctx_t;
 
     playback_ctx_t pctx = { .decoder = &decoder, .done = 0 };
 

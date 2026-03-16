@@ -223,7 +223,10 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                 if (sse_tok_eq(data, &tokens[i], "message") && tokens[i+1].type == JSMN_STRING) {
                     size_t ml = (size_t)(tokens[i+1].end - tokens[i+1].start);
                     ctx->error_msg = malloc(ml + 1);
-                    if (ctx->error_msg) { memcpy(ctx->error_msg, data + tokens[i+1].start, ml); ctx->error_msg[ml] = '\0'; }
+                    if (ctx->error_msg) {
+                        memcpy(ctx->error_msg, data + tokens[i+1].start, ml);
+                        ctx->error_msg[ml] = '\0';
+                    }
                     break;
                 }
             }

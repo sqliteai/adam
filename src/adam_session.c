@@ -439,7 +439,9 @@ adam_status_t adam_session_list(adam_session_t *sess,
     size_t i = 0;
     while (sqlite3_step(sel) == SQLITE_ROW && i < n) {
         const char *id = (const char *)sqlite3_column_text(sel, 0);
-        arr[i++] = id ? strdup(id) : strdup("");
+        arr[i] = strdup(id ? id : "");
+        if (!arr[i]) break; // OOM — return what we have
+        i++;
     }
     sqlite3_finalize(sel);
 
