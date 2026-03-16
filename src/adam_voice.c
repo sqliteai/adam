@@ -23,6 +23,15 @@
 // System TTS (implemented in adam_tts_system.m / adam_tts_system.c)
 extern adam_status_t adam_tts_system_speak(const char *text, const char *language);
 
+// Local STT (implemented in adam_stt_local.c)
+#ifndef ADAM_NO_LOCAL
+extern adam_status_t adam_stt_local_transcribe(
+    adam_settings_t *s, arena_t *arena,
+    const uint8_t *audio, size_t audio_len,
+    adam_audio_format_t format, const char **out_text);
+extern void adam_stt_local_cleanup(adam_settings_t *s);
+#endif
+
 // ============================================================================
 // MARK: - Helpers
 // ============================================================================
@@ -367,7 +376,12 @@ adam_status_t adam_stt_transcribe(adam_settings_t *s, arena_t *arena,
         }
         return rc;
     }
-    case ADAM_STT_LOCAL:  return ADAM_ERR_NOT_IMPLEMENTED;
+    case ADAM_STT_LOCAL:
+#ifndef ADAM_NO_LOCAL
+        return adam_stt_local_transcribe(s, arena, audio, audio_len, format, out_text);
+#else
+        return ADAM_ERR_NOT_IMPLEMENTED;
+#endif
     default:             return ADAM_ERR_INVALID_PARAM;
     }
 }

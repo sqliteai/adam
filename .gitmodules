@@ -10,3 +10,6 @@
 [submodule "modules/llama.cpp"]
 	path = modules/llama.cpp
 	url = https://github.com/ggerganov/llama.cpp.git
+[submodule "modules/whisper.cpp"]
+	path = modules/whisper.cpp
+	url = https://github.com/ggerganov/whisper.cpp.git

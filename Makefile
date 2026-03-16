@@ -16,6 +16,8 @@ CURL_BUILD    := $(CURL_DIR)/build
 MINIAUDIO_DIR := $(ADAM_ROOT)modules/miniaudio
 LLAMA_DIR     := $(ADAM_ROOT)modules/llama.cpp
 LLAMA_BUILD   := $(LLAMA_DIR)/build
+WHISPER_DIR   := $(ADAM_ROOT)modules/whisper.cpp
+WHISPER_BUILD := $(WHISPER_DIR)/build
 
 # ============================================================================
 # Compiler settings
@@ -26,6 +28,7 @@ SQLITE_DIR := $(ADAM_ROOT)modules/sqlite
 CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -O2
 CFLAGS += -Isrc -I$(MINIAUDIO_DIR) -I$(SQLITE_DIR)
 CFLAGS += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include
+CFLAGS += -I$(WHISPER_DIR)/include
 
 # SQLite compile-time options
 SQLITE_FLAGS := -DSQLITE_THREADSAFE=1 \
@@ -50,6 +53,9 @@ LLAMA_LIBS := $(LLAMA_BUILD)/src/libllama.a \
               $(LLAMA_BUILD)/ggml/src/libggml-cpu.a \
               $(LLAMA_BUILD)/ggml/src/libggml-base.a
 
+# Whisper uses only libwhisper.a — ggml symbols come from llama's ggml
+WHISPER_LIBS := $(WHISPER_BUILD)/src/libwhisper.a
+
 ifeq ($(UNAME_S),Darwin)
   # Apple: use NSURLSession — no curl/mbedtls needed
   CFLAGS  += -DADAM_NO_CURL
@@ -63,14 +69,14 @@ ifeq ($(UNAME_S),Darwin)
   LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
   LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
   LDFLAGS += -framework AVFoundation
-  LIBS    := $(LLAMA_LIBS)
+  LIBS    := $(WHISPER_LIBS) $(LLAMA_LIBS)
 else ifeq ($(UNAME_S),Linux)
   # Linux: use libcurl + mbedtls
   CFLAGS  += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
   LDFLAGS += -ldl -lm -lstdc++
   NET_SRC := src/adam_net_curl.c
   TTS_SYS_SRC := src/adam_tts_system.c
-  LIBS    := $(LLAMA_LIBS)
+  LIBS    := $(WHISPER_LIBS) $(LLAMA_LIBS)
   LIBS    += $(CURL_BUILD)/lib/libcurl.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedx509.a
@@ -91,7 +97,8 @@ endif
 # ============================================================================
 
 SRCS := src/arena.c src/adam.c src/adam_json.c src/adam_http.c src/adam_stream.c \
-        src/adam_voice.c src/adam_audio.c src/adam_session.c src/adam_local.c
+        src/adam_voice.c src/adam_audio.c src/adam_session.c src/adam_local.c \
+        src/adam_stt_local.c
 OBJS := $(SRCS:.c=.o)
 
 # SQLite amalgamation (compiled separately with its own flags)
@@ -105,7 +112,7 @@ TTS_SYS_OBJ := $(basename $(TTS_SYS_SRC)).o
 # Targets
 # ============================================================================
 
-.PHONY: all clean test live voice talk chat deps mbedtls curl llama
+.PHONY: all clean test live voice talk chat deps mbedtls curl llama whisper
 
 all: libadam.a
 
@@ -174,7 +181,7 @@ test_voice_talk: libadam.a test/test_voice_talk.c
 
 # --- Dependencies ---
 
-deps: llama
+deps: llama whisper
 ifeq ($(UNAME_S),Linux)
 deps: mbedtls curl
 endif
@@ -185,6 +192,13 @@ llama:
 		-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
 		-DCMAKE_BUILD_TYPE=Release
 	cmake --build $(LLAMA_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc) --target llama --target ggml
+
+whisper:
+	cmake -B $(WHISPER_BUILD) -S $(WHISPER_DIR) \
+		-DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF \
+		-DWHISPER_BUILD_EXAMPLES=OFF \
+		-DCMAKE_BUILD_TYPE=Release
+	cmake --build $(WHISPER_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc) --target whisper
 
 mbedtls:
 	cd $(MBEDTLS_DIR) && git submodule update --init

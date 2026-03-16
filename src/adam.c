@@ -162,7 +162,9 @@ void adam_settings_destroy(adam_settings_t *s) {
     adam_net_cleanup(s);
 #ifndef ADAM_NO_LOCAL
     extern void adam_local_cleanup(adam_settings_t *);
+    extern void adam_stt_local_cleanup(adam_settings_t *);
     adam_local_cleanup(s);
+    adam_stt_local_cleanup(s);
 #endif
     free(s->tools);
     free(s->bootstrap_files);

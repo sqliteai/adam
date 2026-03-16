@@ -1134,7 +1134,8 @@ TEST(voice_start_not_implemented) {
     adam_settings_destroy(s);
 }
 
-TEST(voice_stt_local_not_implemented) {
+TEST(voice_stt_local_bad_model) {
+    // Local STT with default model name (not a file) should fail gracefully
     adam_settings_t *s = adam_create_settings();
     adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, NULL);
 
@@ -1144,8 +1145,8 @@ TEST(voice_stt_local_not_implemented) {
 
     adam_status_t rc = adam_stt_transcribe(s, a, audio, sizeof(audio),
                                            ADAM_AUDIO_WAV, &text);
-    ASSERT_EQ(rc, ADAM_ERR_NOT_IMPLEMENTED);
-    ASSERT_NULL(text);
+    // Should fail (model file doesn't exist) but not crash
+    ASSERT_NE(rc, ADAM_OK);
 
     arena_destroy(a);
     adam_settings_destroy(s);
@@ -1863,6 +1864,218 @@ TEST(stream_on_response_still_fires) {
 }
 
 // ============================================================================
+// MARK: - Tests: Local STT
+// ============================================================================
+
+#ifndef ADAM_NO_LOCAL
+
+// Helper: create a minimal valid WAV buffer (silence)
+static uint8_t *make_silent_wav(arena_t *arena, int sample_rate,
+                                 float seconds, size_t *out_len) {
+    size_t n_samples = (size_t)(sample_rate * seconds);
+    size_t data_size = n_samples * 2; // 16-bit = 2 bytes per sample
+    size_t wav_size = 44 + data_size;
+    uint8_t *wav = arena_zeroalloc(arena, wav_size); // zeroed = silence
+    if (!wav) { *out_len = 0; return NULL; }
+
+    // WAV header
+    uint32_t chunk_size = (uint32_t)(36 + data_size);
+    uint32_t sr = (uint32_t)sample_rate;
+    uint32_t byte_rate = sr * 2;
+    uint16_t block_align = 2;
+    uint16_t bits = 16;
+    uint32_t fmt_size = 16;
+    uint16_t audio_fmt = 1;
+    uint16_t channels = 1;
+    uint32_t ds = (uint32_t)data_size;
+
+    size_t p = 0;
+    memcpy(wav + p, "RIFF", 4); p += 4;
+    memcpy(wav + p, &chunk_size, 4); p += 4;
+    memcpy(wav + p, "WAVE", 4); p += 4;
+    memcpy(wav + p, "fmt ", 4); p += 4;
+    memcpy(wav + p, &fmt_size, 4); p += 4;
+    memcpy(wav + p, &audio_fmt, 2); p += 2;
+    memcpy(wav + p, &channels, 2); p += 2;
+    memcpy(wav + p, &sr, 4); p += 4;
+    memcpy(wav + p, &byte_rate, 4); p += 4;
+    memcpy(wav + p, &block_align, 2); p += 2;
+    memcpy(wav + p, &bits, 2); p += 2;
+    memcpy(wav + p, "data", 4); p += 4;
+    memcpy(wav + p, &ds, 4); p += 4;
+    // PCM data is already zero (silence)
+
+    *out_len = wav_size;
+    return wav;
+}
+
+TEST(local_stt_missing_model) {
+    // Non-existent whisper model should fail gracefully
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, "/tmp/nonexistent_whisper.bin");
+
+    arena_t *a = arena_create(16384);
+    size_t wav_len;
+    uint8_t *wav = make_silent_wav(a, 16000, 0.5f, &wav_len);
+    ASSERT_NOT_NULL(wav);
+
+    const char *text = NULL;
+    adam_status_t rc = adam_stt_transcribe(s, a, wav, wav_len,
+                                           ADAM_AUDIO_WAV, &text);
+    ASSERT_EQ(rc, ADAM_ERR_LOCAL);
+    ASSERT_NULL(text);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(local_stt_null_model) {
+    // NULL model path should fail
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, NULL);
+    // stt_model defaults to "gpt-4o-mini-transcribe" which isn't a file path
+    // The function should check and fail
+
+    arena_t *a = arena_create(16384);
+    size_t wav_len;
+    uint8_t *wav = make_silent_wav(a, 16000, 0.5f, &wav_len);
+    const char *text = NULL;
+
+    adam_status_t rc = adam_stt_transcribe(s, a, wav, wav_len,
+                                           ADAM_AUDIO_WAV, &text);
+    // Should fail (model file doesn't exist)
+    ASSERT_NE(rc, ADAM_OK);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(local_stt_null_audio) {
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, "/tmp/nonexistent.bin");
+
+    arena_t *a = arena_create(4096);
+    const char *text = NULL;
+    adam_status_t rc = adam_stt_transcribe(s, a, NULL, 0,
+                                           ADAM_AUDIO_WAV, &text);
+    ASSERT_EQ(rc, ADAM_ERR_INVALID_PARAM);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(local_stt_empty_audio) {
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, "/tmp/nonexistent.bin");
+
+    arena_t *a = arena_create(4096);
+    uint8_t empty[] = {0};
+    const char *text = NULL;
+    adam_status_t rc = adam_stt_transcribe(s, a, empty, 0,
+                                           ADAM_AUDIO_WAV, &text);
+    ASSERT_EQ(rc, ADAM_ERR_INVALID_PARAM);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(local_stt_invalid_wav) {
+    // Garbage data, not a valid WAV
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, "/tmp/nonexistent.bin");
+
+    arena_t *a = arena_create(4096);
+    uint8_t garbage[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03};
+    const char *text = NULL;
+
+    // Will fail on model load (nonexistent) before reaching WAV parse
+    adam_status_t rc = adam_stt_transcribe(s, a, garbage, sizeof(garbage),
+                                           ADAM_AUDIO_WAV, &text);
+    ASSERT_NE(rc, ADAM_OK);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(local_stt_tiny_wav) {
+    // WAV header only, no actual audio data
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, "/tmp/nonexistent.bin");
+
+    arena_t *a = arena_create(4096);
+    // Minimal WAV: 44 bytes header, 0 bytes data
+    size_t wav_len;
+    uint8_t *wav = make_silent_wav(a, 16000, 0.0f, &wav_len);
+    const char *text = NULL;
+
+    adam_status_t rc = adam_stt_transcribe(s, a, wav, wav_len,
+                                           ADAM_AUDIO_WAV, &text);
+    ASSERT_NE(rc, ADAM_OK);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(local_stt_unsupported_format) {
+    // MP3 format not supported for local STT
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, "/tmp/nonexistent.bin");
+
+    arena_t *a = arena_create(4096);
+    uint8_t fake_mp3[] = {0xFF, 0xFB, 0x90, 0x00}; // MP3 frame header
+    const char *text = NULL;
+
+    // Will fail on model load before format check, but should not crash
+    adam_status_t rc = adam_stt_transcribe(s, a, fake_mp3, sizeof(fake_mp3),
+                                           ADAM_AUDIO_MP3, &text);
+    ASSERT_NE(rc, ADAM_OK);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(local_stt_pcm16_format) {
+    // Raw PCM16 input (no WAV header)
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, "/tmp/nonexistent.bin");
+
+    arena_t *a = arena_create(4096);
+    int16_t silence[160] = {0}; // 10ms of silence at 16kHz
+    const char *text = NULL;
+
+    adam_status_t rc = adam_stt_transcribe(s, a, (uint8_t *)silence,
+                                           sizeof(silence), ADAM_AUDIO_PCM16, &text);
+    ASSERT_NE(rc, ADAM_OK); // fails on model load, not crash
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(local_stt_destroy_without_use) {
+    // Create settings with local STT configured but never call transcribe.
+    // Destroy should not crash.
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, "models/whisper.bin");
+    adam_settings_destroy(s);
+}
+
+TEST(local_stt_null_out_text) {
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, "/tmp/nonexistent.bin");
+
+    arena_t *a = arena_create(4096);
+    uint8_t data[] = {0};
+    adam_status_t rc = adam_stt_transcribe(s, a, data, 1,
+                                           ADAM_AUDIO_WAV, NULL);
+    ASSERT_EQ(rc, ADAM_ERR_INVALID_PARAM);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+#endif // ADAM_NO_LOCAL
+
+// ============================================================================
 // MARK: - Tests: Local Inference
 // ============================================================================
 
@@ -2417,7 +2630,7 @@ int main(void) {
     RUN(voice_settings_set_stt);
     RUN(voice_settings_set_tts);
     RUN(voice_start_not_implemented);
-    RUN(voice_stt_local_not_implemented);
+    RUN(voice_stt_local_bad_model);
     RUN(voice_tts_local_not_implemented);
     RUN(voice_stt_cloud_bad_key);
     RUN(voice_tts_cloud_bad_key);
@@ -2436,6 +2649,19 @@ int main(void) {
     RUN(stream_on_response_still_fires);
 
 #ifndef ADAM_NO_LOCAL
+    // --- Local STT ---
+    printf("\nLocal STT:\n");
+    RUN(local_stt_missing_model);
+    RUN(local_stt_null_model);
+    RUN(local_stt_null_audio);
+    RUN(local_stt_empty_audio);
+    RUN(local_stt_invalid_wav);
+    RUN(local_stt_tiny_wav);
+    RUN(local_stt_unsupported_format);
+    RUN(local_stt_pcm16_format);
+    RUN(local_stt_destroy_without_use);
+    RUN(local_stt_null_out_text);
+
     // --- Local Inference ---
     printf("\nLocal Inference:\n");
     RUN(local_missing_gguf);
