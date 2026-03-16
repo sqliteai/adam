@@ -1689,6 +1689,210 @@ TEST(json_parse_anthropic_multi_tool) {
 }
 
 // ============================================================================
+// MARK: - Tests: Session Persistence
+// ============================================================================
+
+#ifndef ADAM_NO_SQLITE
+
+#include <unistd.h>
+
+TEST(session_open_close) {
+    const char *path = "/tmp/adam_test_session.db";
+    unlink(path);
+    adam_session_t *sess = adam_session_open(path);
+    ASSERT_NOT_NULL(sess);
+    adam_session_close(sess);
+    unlink(path);
+}
+
+TEST(session_save_load_simple) {
+    const char *path = "/tmp/adam_test_session2.db";
+    unlink(path);
+    adam_session_t *sess = adam_session_open(path);
+    ASSERT_NOT_NULL(sess);
+
+    // Build a history
+    adam_history_t *h = adam_history_create();
+    adam_history_append_user(h, "Hello");
+    adam_history_append_assistant(h, "Hi there!", NULL, 0);
+    adam_history_append_user(h, "How are you?");
+    adam_history_append_assistant(h, "I'm doing well!", NULL, 0);
+
+    // Save
+    adam_status_t rc = adam_session_save(sess, "test-001", h);
+    ASSERT_EQ(rc, ADAM_OK);
+
+    // Load into a new history
+    adam_history_t *h2 = adam_history_create();
+    rc = adam_session_load(sess, "test-001", h2);
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_EQ(adam_history_count(h2), 4);
+    ASSERT_EQ(h2->items[0].role, ADAM_ROLE_USER);
+    ASSERT_STR_EQ(h2->items[0].content, "Hello");
+    ASSERT_EQ(h2->items[1].role, ADAM_ROLE_ASSISTANT);
+    ASSERT_STR_EQ(h2->items[1].content, "Hi there!");
+    ASSERT_EQ(h2->items[2].role, ADAM_ROLE_USER);
+    ASSERT_STR_EQ(h2->items[2].content, "How are you?");
+    ASSERT_EQ(h2->items[3].role, ADAM_ROLE_ASSISTANT);
+    ASSERT_STR_EQ(h2->items[3].content, "I'm doing well!");
+
+    adam_history_destroy(h);
+    adam_history_destroy(h2);
+    adam_session_close(sess);
+    unlink(path);
+}
+
+TEST(session_save_load_with_tool_calls) {
+    const char *path = "/tmp/adam_test_session3.db";
+    unlink(path);
+    adam_session_t *sess = adam_session_open(path);
+
+    adam_history_t *h = adam_history_create();
+    adam_history_append_user(h, "What's the weather?");
+
+    // Assistant with tool call
+    adam_tool_call_t tc = {
+        .id = "call_abc", .name = "get_weather",
+        .arguments_json = "{\"city\":\"Rome\"}"
+    };
+    adam_history_append_assistant(h, "Let me check.", &tc, 1);
+
+    // Tool result
+    adam_history_append_tool(h, "{\"temp\":22}", "call_abc");
+
+    // Final answer
+    adam_history_append_assistant(h, "It's 22 degrees in Rome.", NULL, 0);
+
+    adam_session_save(sess, "tool-test", h);
+
+    // Load and verify
+    adam_history_t *h2 = adam_history_create();
+    adam_session_load(sess, "tool-test", h2);
+
+    ASSERT_EQ(adam_history_count(h2), 4);
+
+    // Check tool call on assistant message
+    ASSERT_EQ(h2->items[1].role, ADAM_ROLE_ASSISTANT);
+    ASSERT_EQ(h2->items[1].tool_call_count, 1);
+    ASSERT_STR_EQ(h2->items[1].tool_calls[0].id, "call_abc");
+    ASSERT_STR_EQ(h2->items[1].tool_calls[0].name, "get_weather");
+    ASSERT(strstr(h2->items[1].tool_calls[0].arguments_json, "Rome") != NULL);
+
+    // Check tool result
+    ASSERT_EQ(h2->items[2].role, ADAM_ROLE_TOOL);
+    ASSERT_STR_EQ(h2->items[2].tool_call_id, "call_abc");
+    ASSERT(strstr(h2->items[2].content, "22") != NULL);
+
+    adam_history_destroy(h);
+    adam_history_destroy(h2);
+    adam_session_close(sess);
+    unlink(path);
+}
+
+TEST(session_list_and_delete) {
+    const char *path = "/tmp/adam_test_session4.db";
+    unlink(path);
+    adam_session_t *sess = adam_session_open(path);
+
+    adam_history_t *h = adam_history_create();
+    adam_history_append_user(h, "Test");
+
+    adam_session_save(sess, "session-a", h);
+    adam_session_save(sess, "session-b", h);
+    adam_session_save(sess, "session-c", h);
+
+    // List
+    char **ids = NULL;
+    size_t count = 0;
+    adam_status_t rc = adam_session_list(sess, &ids, &count);
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_EQ(count, 3);
+    ASSERT_NOT_NULL(ids);
+
+    // Free list
+    for (size_t i = 0; i < count; i++) free(ids[i]);
+    free(ids);
+
+    // Delete one
+    rc = adam_session_delete(sess, "session-b");
+    ASSERT_EQ(rc, ADAM_OK);
+
+    // List again
+    rc = adam_session_list(sess, &ids, &count);
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_EQ(count, 2);
+    for (size_t i = 0; i < count; i++) free(ids[i]);
+    free(ids);
+
+    // Load deleted session should fail
+    adam_history_t *h2 = adam_history_create();
+    rc = adam_session_load(sess, "session-b", h2);
+    ASSERT_NE(rc, ADAM_OK);
+
+    adam_history_destroy(h);
+    adam_history_destroy(h2);
+    adam_session_close(sess);
+    unlink(path);
+}
+
+TEST(session_overwrite) {
+    // Saving the same session_id twice should replace the old data
+    const char *path = "/tmp/adam_test_session5.db";
+    unlink(path);
+    adam_session_t *sess = adam_session_open(path);
+
+    adam_history_t *h1 = adam_history_create();
+    adam_history_append_user(h1, "First version");
+    adam_session_save(sess, "overwrite-test", h1);
+
+    adam_history_t *h2 = adam_history_create();
+    adam_history_append_user(h2, "Second version");
+    adam_history_append_assistant(h2, "Updated reply", NULL, 0);
+    adam_session_save(sess, "overwrite-test", h2);
+
+    // Load should get the second version
+    adam_history_t *h3 = adam_history_create();
+    adam_session_load(sess, "overwrite-test", h3);
+    ASSERT_EQ(adam_history_count(h3), 2);
+    ASSERT_STR_EQ(h3->items[0].content, "Second version");
+    ASSERT_STR_EQ(h3->items[1].content, "Updated reply");
+
+    adam_history_destroy(h1);
+    adam_history_destroy(h2);
+    adam_history_destroy(h3);
+    adam_session_close(sess);
+    unlink(path);
+}
+
+TEST(session_persistence_across_reopen) {
+    // Data survives closing and reopening the database
+    const char *path = "/tmp/adam_test_session6.db";
+    unlink(path);
+
+    // Open, save, close
+    adam_session_t *s1 = adam_session_open(path);
+    adam_history_t *h = adam_history_create();
+    adam_history_append_user(h, "Persistent message");
+    adam_session_save(s1, "persist-test", h);
+    adam_session_close(s1);
+
+    // Reopen, load
+    adam_session_t *s2 = adam_session_open(path);
+    adam_history_t *h2 = adam_history_create();
+    adam_status_t rc = adam_session_load(s2, "persist-test", h2);
+    ASSERT_EQ(rc, ADAM_OK);
+    ASSERT_EQ(adam_history_count(h2), 1);
+    ASSERT_STR_EQ(h2->items[0].content, "Persistent message");
+
+    adam_history_destroy(h);
+    adam_history_destroy(h2);
+    adam_session_close(s2);
+    unlink(path);
+}
+
+#endif // ADAM_NO_SQLITE
+
+// ============================================================================
 // MARK: - Performance Benchmarks
 // ============================================================================
 
@@ -1864,6 +2068,17 @@ int main(void) {
     RUN(voice_custom_stt_callback);
     RUN(voice_custom_tts_callback);
     RUN(voice_run_full_pipeline);
+#endif
+
+#ifndef ADAM_NO_SQLITE
+    // --- Sessions ---
+    printf("\nSessions:\n");
+    RUN(session_open_close);
+    RUN(session_save_load_simple);
+    RUN(session_save_load_with_tool_calls);
+    RUN(session_list_and_delete);
+    RUN(session_overwrite);
+    RUN(session_persistence_across_reopen);
 #endif
 
     // --- Performance ---

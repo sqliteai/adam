@@ -19,9 +19,23 @@ MINIAUDIO_DIR := $(ADAM_ROOT)modules/miniaudio
 # Compiler settings
 # ============================================================================
 
+SQLITE_DIR := $(ADAM_ROOT)modules/sqlite
+
 CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -O2
-CFLAGS += -Isrc -I$(MINIAUDIO_DIR)
-CFLAGS += -DADAM_NO_LOCAL -DADAM_NO_SQLITE
+CFLAGS += -Isrc -I$(MINIAUDIO_DIR) -I$(SQLITE_DIR)
+CFLAGS += -DADAM_NO_LOCAL
+
+# SQLite compile-time options
+SQLITE_FLAGS := -DSQLITE_THREADSAFE=1 \
+                -DSQLITE_ENABLE_FTS5=1 \
+                -DSQLITE_DQS=0 \
+                -DSQLITE_DEFAULT_MEMSTATUS=0 \
+                -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 \
+                -DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
+                -DSQLITE_OMIT_DEPRECATED \
+                -DSQLITE_OMIT_SHARED_CACHE \
+                -DSQLITE_USE_ALLOCA \
+                -DSQLITE_OMIT_AUTOINIT
 
 LDFLAGS := -lpthread -lz
 
@@ -61,8 +75,11 @@ endif
 # ============================================================================
 
 SRCS := src/arena.c src/adam.c src/adam_json.c src/adam_http.c \
-        src/adam_voice.c src/adam_audio.c
+        src/adam_voice.c src/adam_audio.c src/adam_session.c
 OBJS := $(SRCS:.c=.o)
+
+# SQLite amalgamation (compiled separately with its own flags)
+SQLITE_OBJ := $(SQLITE_DIR)/sqlite3.o
 
 # Net object (may be .c or .m)
 NET_OBJ := $(basename $(NET_SRC)).o
@@ -77,11 +94,15 @@ all: libadam.a
 
 # --- Static library ---
 
-libadam.a: $(OBJS) $(NET_OBJ)
+libadam.a: $(OBJS) $(NET_OBJ) $(SQLITE_OBJ)
 	ar rcs $@ $^
 
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# SQLite amalgamation — compiled with its own flags (no -Wpedantic, etc.)
+$(SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c
+	$(CC) -std=c11 -O2 $(SQLITE_FLAGS) -c $< -o $@
 
 # Objective-C compilation for Apple net layer
 src/adam_net_apple.o: src/adam_net_apple.m
@@ -147,5 +168,5 @@ curl: mbedtls
 # --- Clean ---
 
 clean:
-	rm -f $(OBJS) $(NET_OBJ) libadam.a test_adam test_live test_voice_interactive test_voice_talk
+	rm -f $(OBJS) $(NET_OBJ) $(SQLITE_OBJ) libadam.a test_adam test_live test_voice_interactive test_voice_talk
 	rm -rf test_adam.dSYM test_live.dSYM test_voice_interactive.dSYM test_voice_talk.dSYM

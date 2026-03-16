@@ -20,6 +20,10 @@
 #include <curl/curl.h>
 #endif
 
+#ifndef ADAM_NO_SQLITE
+#include "sqlite3.h"
+#endif
+
 // ============================================================================
 // MARK: - Internal: Logging Helper
 // ============================================================================
@@ -71,12 +75,18 @@ adam_status_t adam_init(void) {
 #if !defined(ADAM_NO_CURL) && !defined(__APPLE__)
     curl_global_init(CURL_GLOBAL_DEFAULT);
 #endif
+#ifndef ADAM_NO_SQLITE
+    sqlite3_initialize();
+#endif
     return ADAM_OK;
 }
 
 void adam_cleanup(void) {
 #if !defined(ADAM_NO_CURL) && !defined(__APPLE__)
     curl_global_cleanup();
+#endif
+#ifndef ADAM_NO_SQLITE
+    sqlite3_shutdown();
 #endif
 }
 
