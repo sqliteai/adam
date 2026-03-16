@@ -13,6 +13,7 @@ adam
 
 # Models
 *.gguf
+*.bin
 models/
 
 # Secrets
