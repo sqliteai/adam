@@ -10,6 +10,10 @@ test_voice_interactive
 test_voice_talk
 adam
 
+# Models
+*.gguf
+models/
+
 # Secrets
 .env
 *.key
