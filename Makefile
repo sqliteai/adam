@@ -100,7 +100,7 @@ NET_OBJ := $(basename $(NET_SRC)).o
 # Targets
 # ============================================================================
 
-.PHONY: all clean test live voice talk deps mbedtls curl llama
+.PHONY: all clean test live voice talk chat deps mbedtls curl llama
 
 all: libadam.a
 
@@ -142,6 +142,18 @@ voice: test_voice_interactive
 test_voice_interactive: libadam.a test/test_voice_interactive.c
 	$(CC) $(CFLAGS) -g \
 		test/test_voice_interactive.c \
+		-L. -ladam $(LIBS) $(LDFLAGS) -o $@
+
+chat: test_chat
+ifdef GGUF
+	./test_chat $(GGUF)
+else
+	./test_chat
+endif
+
+test_chat: libadam.a test/test_chat.c
+	$(CC) $(CFLAGS) -g \
+		test/test_chat.c \
 		-L. -ladam $(LIBS) $(LDFLAGS) -o $@
 
 talk: test_voice_talk
@@ -190,5 +202,5 @@ curl: mbedtls
 # --- Clean ---
 
 clean:
-	rm -f $(OBJS) $(NET_OBJ) $(SQLITE_OBJ) libadam.a test_adam test_live test_voice_interactive test_voice_talk
+	rm -f $(OBJS) $(NET_OBJ) $(SQLITE_OBJ) libadam.a test_adam test_live test_chat test_voice_interactive test_voice_talk
 	rm -rf test_adam.dSYM test_live.dSYM test_voice_interactive.dSYM test_voice_talk.dSYM
