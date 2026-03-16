@@ -153,24 +153,27 @@ struct adam_pcm_player_t {
 #define RING_SAMPLES (PCM_RING_SIZE / sizeof(int16_t))
 
 static size_t ring_available(adam_pcm_player_t *p) {
-    size_t w = p->write_pos;
-    size_t r = p->read_pos;
+    size_t w = __atomic_load_n(&p->write_pos, __ATOMIC_ACQUIRE);
+    size_t r = __atomic_load_n(&p->read_pos, __ATOMIC_ACQUIRE);
     return (w >= r) ? (w - r) : (RING_SAMPLES - r + w);
 }
 
 static void pcm_playback_callback(ma_device *device, void *output,
                                     const void *input, ma_uint32 frame_count) {
-    (void)input;
+    (void)input; (void)device;
     adam_pcm_player_t *p = (adam_pcm_player_t *)device->pUserData;
     int16_t *out = (int16_t *)output;
     size_t frames_needed = frame_count * (size_t)p->channels;
-    size_t avail = ring_available(p);
+    size_t w = __atomic_load_n(&p->write_pos, __ATOMIC_ACQUIRE);
+    size_t r = p->read_pos;  // only consumer reads read_pos
+    size_t avail = (w >= r) ? (w - r) : (RING_SAMPLES - r + w);
 
     size_t to_read = (avail < frames_needed) ? avail : frames_needed;
     for (size_t i = 0; i < to_read; i++) {
-        out[i] = p->ring[p->read_pos % RING_SAMPLES];
-        p->read_pos = (p->read_pos + 1) % RING_SAMPLES;
+        out[i] = p->ring[r % RING_SAMPLES];
+        r = (r + 1) % RING_SAMPLES;
     }
+    __atomic_store_n(&p->read_pos, r, __ATOMIC_RELEASE);
     // Fill remainder with silence
     for (size_t i = to_read; i < frames_needed; i++) {
         out[i] = 0;
@@ -220,11 +223,13 @@ void adam_pcm_player_feed(adam_pcm_player_t *p, const uint8_t *pcm_data, size_t 
         pair[0] = p->leftover_byte;
         pair[1] = src[0];
         int16_t sample;
-        memcpy(&sample, pair, 2); // preserves endianness
-        size_t next = (p->write_pos + 1) % RING_SAMPLES;
-        while (next == p->read_pos) ma_sleep(1);
-        p->ring[p->write_pos] = sample;
-        p->write_pos = next;
+        memcpy(&sample, pair, 2);
+        size_t w = __atomic_load_n(&p->write_pos, __ATOMIC_RELAXED);
+        size_t next = (w + 1) % RING_SAMPLES;
+        while (next == __atomic_load_n(&p->read_pos, __ATOMIC_ACQUIRE))
+            ma_sleep(1);
+        p->ring[w] = sample;
+        __atomic_store_n(&p->write_pos, next, __ATOMIC_RELEASE);
         src++;
         remaining--;
         p->has_leftover = 0;
@@ -238,14 +243,17 @@ void adam_pcm_player_feed(adam_pcm_player_t *p, const uint8_t *pcm_data, size_t 
     }
 
     // Feed complete 16-bit samples
-    size_t samples = remaining / 2;
-    for (size_t i = 0; i < samples; i++) {
+    size_t n_samples = remaining / 2;
+    size_t w = __atomic_load_n(&p->write_pos, __ATOMIC_RELAXED);
+    for (size_t i = 0; i < n_samples; i++) {
         int16_t sample;
         memcpy(&sample, src + i * 2, 2); // safe unaligned read
-        size_t next = (p->write_pos + 1) % RING_SAMPLES;
-        while (next == p->read_pos) ma_sleep(1);
-        p->ring[p->write_pos] = sample;
-        p->write_pos = next;
+        size_t next = (w + 1) % RING_SAMPLES;
+        while (next == __atomic_load_n(&p->read_pos, __ATOMIC_ACQUIRE))
+            ma_sleep(1);
+        p->ring[w] = sample;
+        __atomic_store_n(&p->write_pos, next, __ATOMIC_RELEASE);
+        w = next;
     }
 }
 

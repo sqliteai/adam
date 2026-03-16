@@ -19,6 +19,8 @@ extern "C" {
 // MARK: - Version
 // ============================================================================
 
+#define UNUSED_PARAM(p) ((void)(p))
+
 #define ADAM_VERSION_MAJOR       0
 #define ADAM_VERSION_MINOR       1
 #define ADAM_VERSION_PATCH       0

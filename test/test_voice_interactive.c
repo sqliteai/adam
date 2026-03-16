@@ -25,7 +25,6 @@
 #include <pthread.h>
 #endif
 
-#define UNUSED_PARAM(p) ((void)(p))
 
 // ============================================================================
 // MARK: - .env loader

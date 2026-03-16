@@ -14,7 +14,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#define UNUSED_PARAM(p) ((void)(p))
+// Auth header overhead: "Authorization: Bearer " = 22 chars + NUL
+#define AUTH_HDR_EXTRA 32
+
 
 // ============================================================================
 // MARK: - Internal: curl helpers (shared with adam_http.c)
@@ -123,8 +125,8 @@ static adam_status_t cloud_stt(
     curl_mime_data(part, "json", CURL_ZERO_TERMINATED);
 
     // Auth header
-    char *auth_hdr = arena_alloc(arena, strlen(key) + 32);
-    snprintf(auth_hdr, strlen(key) + 32, "Authorization: Bearer %s", key);
+    char *auth_hdr = arena_alloc(arena, strlen(key) + AUTH_HDR_EXTRA);
+    snprintf(auth_hdr, strlen(key) + AUTH_HDR_EXTRA, "Authorization: Bearer %s", key);
 
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, auth_hdr);
@@ -147,24 +149,10 @@ static adam_status_t cloud_stt(
     } else {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         if (http_code >= 400) {
-            // Extract error message from JSON response for better diagnostics
-            if (write_ctx.buf) {
-                const char *msg = strstr(write_ctx.buf, "\"message\"");
-                if (msg) {
-                    msg = strchr(msg + 9, '"');
-                    if (msg) {
-                        msg++;
-                        const char *end = strchr(msg, '"');
-                        if (end) {
-                            size_t mlen = (size_t)(end - msg);
-                            char *err = arena_alloc(arena, mlen + 32);
-                            snprintf(err, mlen + 32, "STT error (HTTP %ld): %.*s",
-                                     http_code, (int)mlen, msg);
-                            // Store as out_text so caller can see the error
-                            fprintf(stderr, "  [STT] %s\n", err);
-                        }
-                    }
-                }
+            // Log the error response for diagnostics
+            if (write_ctx.buf && write_ctx.len > 0) {
+                fprintf(stderr, "  [STT] HTTP %ld: %.200s\n",
+                        http_code, write_ctx.buf);
             }
             if (http_code == 429)
                 status = ADAM_ERR_RATE_LIMIT;
@@ -277,8 +265,8 @@ static adam_status_t cloud_tts(
     pos += (size_t)snprintf(body + pos, body_cap - pos, "\"}");
 
     // Headers
-    char *auth_hdr = arena_alloc(arena, strlen(key) + 32);
-    snprintf(auth_hdr, strlen(key) + 32, "Authorization: Bearer %s", key);
+    char *auth_hdr = arena_alloc(arena, strlen(key) + AUTH_HDR_EXTRA);
+    snprintf(auth_hdr, strlen(key) + AUTH_HDR_EXTRA, "Authorization: Bearer %s", key);
 
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -575,8 +563,8 @@ static adam_status_t cloud_tts_streaming(
     }
     pos += (size_t)snprintf(body + pos, body_cap - pos, "\"}");
 
-    char *auth_hdr = malloc(strlen(key) + 32);
-    snprintf(auth_hdr, strlen(key) + 32, "Authorization: Bearer %s", key);
+    char *auth_hdr = malloc(strlen(key) + AUTH_HDR_EXTRA);
+    snprintf(auth_hdr, strlen(key) + AUTH_HDR_EXTRA, "Authorization: Bearer %s", key);
 
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");

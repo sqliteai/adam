@@ -12,7 +12,6 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
-#define UNUSED_PARAM(p) ((void)(p))
 
 // ============================================================================
 // MARK: - Growable arena buffer
@@ -616,7 +615,8 @@ static adam_llm_response_t parse_openai(
             int arr_size = tokens[i+1].size;
             if (arr_size < 1) { i = tok_skip(tokens, i + 1, ntok); continue; }
             // Find message object in first choice
-            int choice = i + 2; // first choice object
+            int choice = i + 2;
+            if (choice >= ntok) { i = tok_skip(tokens, i + 1, ntok); continue; }
             if (tokens[choice].type != JSMN_OBJECT) { i = tok_skip(tokens, i + 1, ntok); continue; }
             int choice_size = tokens[choice].size;
             int k = choice + 1;

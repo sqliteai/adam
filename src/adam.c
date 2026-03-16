@@ -23,7 +23,6 @@
 // MARK: - Internal: Logging Helper
 // ============================================================================
 
-#define UNUSED_PARAM(p) ((void)(p))
 
 #define ADAM_LOG(s, level, ...)                                              \
     do {                                                                    \
@@ -69,16 +68,14 @@ const char *adam_status_string(adam_status_t status) {
 
 adam_status_t adam_init(void) {
 #ifndef ADAM_NO_CURL
-    // curl_global_init(CURL_GLOBAL_DEFAULT);
-    // TODO: call curl_global_init when adam_http.c is implemented
+    curl_global_init(CURL_GLOBAL_DEFAULT);
 #endif
     return ADAM_OK;
 }
 
 void adam_cleanup(void) {
 #ifndef ADAM_NO_CURL
-    // curl_global_cleanup();
-    // TODO: call curl_global_cleanup when adam_http.c is implemented
+    curl_global_cleanup();
 #endif
 }
 
@@ -574,13 +571,27 @@ static const char *build_system_prompt(arena_t *arena, adam_settings_t *s,
         fseek(f, 0, SEEK_END);
         long flen = ftell(f);
         fseek(f, 0, SEEK_SET);
-        if (flen > 0 && pos + (size_t)flen + 256 < est) {
-            pos += snprintf(buf + pos, est - pos, "## %s\n",
-                            s->bootstrap_files[i]);
-            size_t read = fread(buf + pos, 1, (size_t)flen, f);
-            pos += read;
-            buf[pos++] = '\n';
-            buf[pos++] = '\n';
+        if (flen > 0) {
+            // Grow buffer if needed
+            size_t need = (size_t)flen + 256;
+            if (pos + need >= est) {
+                size_t new_est = est;
+                while (new_est < pos + need + 1) new_est *= 2;
+                char *new_buf = arena_alloc(arena, new_est);
+                if (new_buf) {
+                    memcpy(new_buf, buf, pos);
+                    buf = new_buf;
+                    est = new_est;
+                }
+            }
+            if (pos + need < est) {
+                pos += (size_t)snprintf(buf + pos, est - pos, "## %s\n",
+                                        s->bootstrap_files[i]);
+                size_t read = fread(buf + pos, 1, (size_t)flen, f);
+                pos += read;
+                buf[pos++] = '\n';
+                buf[pos++] = '\n';
+            }
         }
         fclose(f);
     }

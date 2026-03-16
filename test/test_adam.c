@@ -22,7 +22,6 @@
 #include <time.h>
 #include <assert.h>
 
-#define UNUSED_PARAM(p) ((void)(p))
 
 #ifndef ADAM_NO_PTHREADS
 #include <pthread.h>
