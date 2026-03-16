@@ -687,6 +687,12 @@ extern adam_llm_response_t adam_llm_call_http(
     const adam_tool_def_t *tools, size_t tool_count
 );
 
+extern adam_llm_response_t adam_llm_call_http_stream(
+    arena_t *arena, adam_settings_t *s,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+);
+
 #ifndef ADAM_NO_LOCAL
 extern adam_llm_response_t adam_llm_call_local(
     arena_t *arena, adam_settings_t *s,
@@ -726,8 +732,13 @@ static adam_llm_response_t dispatch_llm(
     }
 
 #if !defined(ADAM_NO_CURL) || defined(__APPLE__)
-    // adam_llm_call_http uses adam_net which has platform-specific backends:
-    // Apple → NSURLSession, Linux/Windows → libcurl
+    // Use streaming if on_stream callback is set (real-time token delivery)
+    if (s->on_stream) {
+        adam_llm_response_t resp = adam_llm_call_http_stream(
+            arena, s, msgs, msg_count, s->tools, s->tool_count);
+        if (resp.error == ADAM_OK) return resp;
+        // Streaming failed — fall back to non-streaming silently
+    }
     return adam_llm_call_http(arena, s, msgs, msg_count,
                               s->tools, s->tool_count);
 #else

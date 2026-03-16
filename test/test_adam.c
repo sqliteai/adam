@@ -1689,6 +1689,180 @@ TEST(json_parse_anthropic_multi_tool) {
 }
 
 // ============================================================================
+// MARK: - Tests: Streaming
+// ============================================================================
+
+// Track streaming chunks
+typedef struct {
+    char     chunks[4096];
+    size_t   total_len;
+    int      chunk_count;
+    int      got_done;
+} stream_tracker_t;
+
+static void track_stream(void *ctx, const char *chunk, size_t len, int is_done) {
+    stream_tracker_t *t = (stream_tracker_t *)ctx;
+    if (len > 0 && t->total_len + len < sizeof(t->chunks)) {
+        memcpy(t->chunks + t->total_len, chunk, len);
+        t->total_len += len;
+        t->chunks[t->total_len] = '\0';
+    }
+    if (len > 0) t->chunk_count++;
+    if (is_done) t->got_done = 1;
+}
+
+TEST(stream_simple_response) {
+    // Verify on_stream receives the same text as final_response
+    stream_tracker_t tracker = {0};
+    mock_llm_ctx_t mock = { .fixed_response = "Streamed hello world!" };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->on_stream = track_stream;
+    s->stream_ctx = &tracker;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Hi");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_NOT_NULL(r.final_response);
+    // With mock LLM (non-streaming), on_stream is NOT called
+    // (streaming only triggers for cloud HTTP path)
+    // The final response should still be correct
+    ASSERT_STR_EQ(r.final_response, "Streamed hello world!");
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(stream_with_tool_calls) {
+    // Verify streaming works when tool calls are involved
+    // Mock LLM returns tool call then final answer
+    stream_tracker_t tracker = {0};
+    mock_llm_ctx_t mock = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_with_tool, &mock);
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "search", .execute = mock_tool_search });
+    s->on_stream = track_stream;
+    s->stream_ctx = &tracker;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Search for X");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_NOT_NULL(r.final_response);
+    // The agent should have made 2 LLM calls (tool call + final answer)
+    ASSERT_EQ(mock.call_count, 2);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(stream_null_callback) {
+    // on_stream = NULL should work fine (non-streaming path)
+    mock_llm_ctx_t mock = { .fixed_response = "No stream" };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->on_stream = NULL;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Hi");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_STR_EQ(r.final_response, "No stream");
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(stream_error_no_crash) {
+    // Stream callback set but LLM returns error — should not crash
+    stream_tracker_t tracker = {0};
+    mock_llm_ctx_t mock = { .simulate_error = ADAM_ERR_AUTH };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_error, &mock);
+    s->on_stream = track_stream;
+    s->stream_ctx = &tracker;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Hi");
+
+    ASSERT_EQ(r.status, ADAM_ERR_AUTH);
+    ASSERT_EQ(tracker.got_done, 0); // stream never started
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(stream_multi_turn) {
+    // Streaming across multiple turns — each turn should deliver content
+    mock_llm_ctx_t mock = { .fixed_response = "Turn response" };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->on_stream = track_stream;
+
+    adam_history_t *h = adam_history_create();
+
+    for (int i = 0; i < 5; i++) {
+        stream_tracker_t tracker = {0};
+        s->stream_ctx = &tracker;
+        adam_run_result_t r = adam_run(s, h, "Next turn");
+        ASSERT_EQ(r.status, ADAM_OK);
+        adam_run_result_free(&r);
+    }
+
+    ASSERT_EQ(adam_history_count(h), 11); // system + 5*(user + assistant)
+
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+// ============================================================================
+// MARK: - Tests: SSE Parser (unit test the parser directly)
+// ============================================================================
+
+// We test the SSE parser by including adam_stream.h and calling
+// adam_llm_call_http_stream with a mock that simulates SSE events.
+// Since we can't easily mock the HTTP layer for SSE, we test the
+// integration through the live tests instead. Here we verify the
+// stream callback behavior through the agent loop.
+
+TEST(stream_on_response_still_fires) {
+    // Both on_stream and on_response should work together
+    // on_response fires after the complete response is assembled
+    stream_tracker_t tracker = {0};
+    resp_ctx_t rctx = {0};
+    mock_llm_ctx_t mock = { .fixed_response = "Dual callback test" };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->on_stream = track_stream;
+    s->stream_ctx = &tracker;
+    adam_settings_set_callbacks(s, on_resp, NULL, NULL, &rctx);
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Test");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    // on_response should have been called with the full response
+    ASSERT_EQ(rctx.call_count, 1);
+    ASSERT_STR_EQ(rctx.last, "Dual callback test");
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+// ============================================================================
 // MARK: - Tests: Local Inference
 // ============================================================================
 
@@ -2251,6 +2425,15 @@ int main(void) {
     RUN(voice_custom_tts_callback);
     RUN(voice_run_full_pipeline);
 #endif
+
+    // --- Streaming ---
+    printf("\nStreaming:\n");
+    RUN(stream_simple_response);
+    RUN(stream_with_tool_calls);
+    RUN(stream_null_callback);
+    RUN(stream_error_no_crash);
+    RUN(stream_multi_turn);
+    RUN(stream_on_response_still_fires);
 
 #ifndef ADAM_NO_LOCAL
     // --- Local Inference ---

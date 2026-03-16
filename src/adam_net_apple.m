@@ -280,7 +280,8 @@ didCompleteWithError:(NSError *)error {
 
 adam_net_response_t adam_net_post_streaming(
     adam_settings_t *s, const char *url, const char *auth_header,
-    const char *body, adam_net_stream_fn on_chunk, void *stream_ctx,
+    const char *body, const char **extra_headers,
+    adam_net_stream_fn on_chunk, void *stream_ctx,
     int handle_id
 ) {
     UNUSED_PARAM(s); UNUSED_PARAM(handle_id);
@@ -301,7 +302,7 @@ adam_net_response_t adam_net_post_streaming(
                                           delegate:delegate
                                      delegateQueue:nil];
 
-        NSMutableURLRequest *req = make_request(url, auth_header, NULL);
+        NSMutableURLRequest *req = make_request(url, auth_header, extra_headers);
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         req.HTTPBody = [NSData dataWithBytes:body length:strlen(body)];
 

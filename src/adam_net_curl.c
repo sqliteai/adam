@@ -192,7 +192,8 @@ adam_net_response_t adam_net_post_multipart(
 
 adam_net_response_t adam_net_post_streaming(
     adam_settings_t *s, const char *url, const char *auth_header,
-    const char *body, adam_net_stream_fn on_chunk, void *stream_ctx,
+    const char *body, const char **extra_headers,
+    adam_net_stream_fn on_chunk, void *stream_ctx,
     int handle_id
 ) {
     adam_net_response_t resp = {0};
@@ -202,6 +203,10 @@ adam_net_response_t adam_net_post_streaming(
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
     if (auth_header) headers = curl_slist_append(headers, auth_header);
+    if (extra_headers) {
+        for (int i = 0; extra_headers[i]; i++)
+            headers = curl_slist_append(headers, extra_headers[i]);
+    }
 
     stream_cb_ctx_t sc = { .fn = on_chunk, .ctx = stream_ctx };
 

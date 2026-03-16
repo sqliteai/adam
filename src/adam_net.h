@@ -90,12 +90,13 @@ adam_net_response_t adam_net_post_multipart(
 );
 
 // POST JSON, stream response body via callback.
-// Used for streaming TTS (PCM chunks piped to audio player).
+// Used for streaming TTS and SSE LLM responses.
 adam_net_response_t adam_net_post_streaming(
     adam_settings_t *s,
     const char      *url,
     const char      *auth_header,
     const char      *body,
+    const char     **extra_headers,  // NULL-terminated array, or NULL
     adam_net_stream_fn on_chunk,
     void            *stream_ctx,
     int              handle_id

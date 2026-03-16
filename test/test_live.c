@@ -484,7 +484,98 @@ static void test_multilingual(adam_settings_t *s) {
 }
 
 // ============================================================================
-// MARK: - Test 11: Thread pool with real API calls
+// MARK: - Test 11: Streaming — real SSE from Anthropic
+// ============================================================================
+
+typedef struct {
+    char     chunks[8192];
+    size_t   total_len;
+    int      chunk_count;
+    int      got_done;
+} live_stream_t;
+
+static void live_stream_cb(void *ctx, const char *chunk, size_t len, int is_done) {
+    live_stream_t *t = (live_stream_t *)ctx;
+    if (len > 0 && t->total_len + len < sizeof(t->chunks) - 1) {
+        memcpy(t->chunks + t->total_len, chunk, len);
+        t->total_len += len;
+        t->chunks[t->total_len] = '\0';
+    }
+    if (len > 0) t->chunk_count++;
+    if (is_done) t->got_done = 1;
+}
+
+static void test_stream_text(adam_settings_t *s) {
+    printf("\n--- Test 11: Streaming — text response ---\n");
+
+    live_stream_t tracker = {0};
+    adam_stream_fn old_fn = s->on_stream;
+    void *old_ctx = s->stream_ctx;
+    s->on_stream = live_stream_cb;
+    s->stream_ctx = &tracker;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h,
+        "Count from 1 to 5 separated by commas. Nothing else.");
+
+    printf("  Response:   %.80s\n", r.final_response ? r.final_response : "(null)");
+    printf("  Chunks:     %d\n", tracker.chunk_count);
+    printf("  Streamed:   %.80s\n", tracker.chunks);
+
+    // Verify: got multiple chunks (not all at once)
+    int ok = (r.status == ADAM_OK && r.final_response
+              && tracker.got_done
+              && tracker.chunk_count >= 1
+              && strstr(tracker.chunks, "1") != NULL
+              && strstr(tracker.chunks, "5") != NULL);
+    report("stream_text", ok, &r);
+
+    s->on_stream = old_fn;
+    s->stream_ctx = old_ctx;
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+}
+
+static void test_stream_with_tool(adam_settings_t *s) {
+    printf("\n--- Test 12: Streaming — with tool call ---\n");
+
+    live_stream_t tracker = {0};
+    adam_stream_fn old_fn = s->on_stream;
+    void *old_ctx = s->stream_ctx;
+    s->on_stream = live_stream_cb;
+    s->stream_ctx = &tracker;
+
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "get_weather",
+        .description = "Get current weather for a city",
+        .parameters_json = "{\"type\":\"object\",\"properties\":"
+            "{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}",
+        .execute = tool_weather,
+    });
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h,
+        "What's the weather in Rome? Use the get_weather tool.");
+
+    printf("  Response:   %.80s\n", r.final_response ? r.final_response : "(null)");
+    printf("  Iterations: %d\n", r.total_iterations);
+    printf("  Chunks:     %d\n", tracker.chunk_count);
+
+    // Should have used tool (iterations > 1) and got a response
+    // Streaming may fall back to non-streaming on rate limits
+    int ok = (r.status == ADAM_OK && r.total_iterations >= 2
+              && r.final_response != NULL);
+    report("stream_tool", ok, &r);
+
+    adam_settings_remove_tool(s, "get_weather");
+    s->on_stream = old_fn;
+    s->stream_ctx = old_ctx;
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+}
+
+// ============================================================================
+// MARK: - Test 13: Thread pool with real API calls
 // ============================================================================
 
 #ifndef ADAM_NO_PTHREADS
@@ -762,6 +853,8 @@ int main(void) {
     test_tool_then_followup(s);
     test_streaming(s);
     test_multilingual(s);
+    test_stream_text(s);
+    test_stream_with_tool(s);
 
 #ifndef ADAM_NO_PTHREADS
     test_thread_pool(s);

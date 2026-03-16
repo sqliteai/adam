@@ -303,7 +303,7 @@ static adam_status_t cloud_tts_streaming(adam_settings_t *s, const char *text) {
     stream_tts_ctx_t sc = {0};
 
     adam_net_response_t net = adam_net_post_streaming(
-        s, url, auth, body, stream_tts_chunk, &sc, /*handle_id=*/2
+        s, url, auth, body, NULL, stream_tts_chunk, &sc, /*handle_id=*/2
     );
 
     free(auth);
