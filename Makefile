@@ -172,7 +172,15 @@ test_chat: libadam.a test/test_chat.c
 		-L. -ladam $(LIBS) $(LDFLAGS) -o $@
 
 talk: test_voice_talk
+ifdef LOCAL
+ifdef GGUF
+	./test_voice_talk --local $(GGUF)
+else
+	./test_voice_talk --local
+endif
+else
 	./test_voice_talk
+endif
 
 test_voice_talk: libadam.a test/test_voice_talk.c
 	$(CC) $(CFLAGS) -g \

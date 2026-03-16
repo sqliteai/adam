@@ -3,15 +3,22 @@
 //  Adam — Fully voice-interactive conversation
 //
 //  Speak into your microphone. The agent listens, thinks, and speaks back.
-//  The conversation continues until you say "quit" or "exit".
-//  Speaks in whatever language you use.
+//  Supports both cloud and fully local (offline) modes.
 //
-//  LLM:  Grok (xAI) via OpenAI-compatible API
-//  STT:  OpenAI gpt-4o-mini-transcribe (faster than whisper-1)
-//  TTS:  OpenAI gpt-4o-mini-tts (faster than tts-1) + miniaudio playback
-//
-//  Build & run:
+//  Cloud mode (default):
 //    make talk
+//    STT: OpenAI gpt-4o-mini-transcribe
+//    LLM: GPT-4o-mini / Anthropic / Grok
+//    TTS: OpenAI gpt-4o-mini-tts + miniaudio
+//
+//  Local mode (fully offline):
+//    make talk LOCAL=1
+//    STT: whisper.cpp (models/ggml-base.en.bin)
+//    LLM: llama.cpp  (models/*.gguf)
+//    TTS: OS built-in (AVSpeechSynthesizer / espeak-ng)
+//
+//  Custom GGUF:
+//    make talk LOCAL=1 GGUF=models/my-model.gguf
 //
 
 #include "adam.h"
@@ -21,7 +28,6 @@
 #include <string.h>
 #include <signal.h>
 #include <pthread.h>
-
 
 // ============================================================================
 // MARK: - .env loader
@@ -89,20 +95,12 @@ static uint8_t *record_speech(size_t *out_len) {
 }
 
 // ============================================================================
-// MARK: - Voice selection
+// MARK: - Cloud voice selection
 // ============================================================================
 
 static const char *g_voices[] = {
-    "alloy",    // 0 — Neutral, balanced
-    "ash",      // 1 — Warm, conversational
-    "ballad",   // 2 — Soft, gentle
-    "coral",    // 3 — Clear, friendly
-    "echo",     // 4 — Smooth, authoritative
-    "fable",    // 5 — Expressive, storytelling
-    "nova",     // 6 — Bright, energetic
-    "sage",     // 7 — Calm, measured
-    "shimmer",  // 8 — Light, upbeat
-    "verse",    // 9 — Versatile, dynamic
+    "alloy", "ash", "ballad", "coral", "echo",
+    "fable", "nova", "sage", "shimmer", "verse",
 };
 static const char *g_voice_desc[] = {
     "Neutral, balanced",
@@ -131,28 +129,22 @@ static const char *pick_voice(void) {
     if (!fgets(buf, sizeof(buf), stdin) || buf[0] == '\n')
         return "coral";
 
-    // Strip newline
     size_t len = strlen(buf);
     while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r'))
         buf[--len] = '\0';
 
-    // Try as number
-    if (len == 1 && buf[0] >= '0' && buf[0] <= '9') {
+    if (len == 1 && buf[0] >= '0' && buf[0] <= '9')
         return g_voices[buf[0] - '0'];
-    }
 
-    // Try as name
-    for (int i = 0; i < NUM_VOICES; i++) {
-        if (strcmp(buf, g_voices[i]) == 0)
-            return g_voices[i];
-    }
+    for (int i = 0; i < NUM_VOICES; i++)
+        if (strcmp(buf, g_voices[i]) == 0) return g_voices[i];
 
     printf("  (unknown voice \"%s\", using coral)\n", buf);
     return "coral";
 }
 
 // ============================================================================
-// MARK: - Signal handling (Ctrl+C to quit)
+// MARK: - Signal handling
 // ============================================================================
 
 static volatile int g_quit = 0;
@@ -160,54 +152,118 @@ static volatile int g_quit = 0;
 static void sigint_handler(int sig) {
     (void)sig;
     g_quit = 1;
-    // Also stop any ongoing recording
     g_stop_recording = 1;
+}
+
+// ============================================================================
+// MARK: - Detect local mode
+// ============================================================================
+
+static int is_local_mode(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--local") == 0 || strcmp(argv[i], "-l") == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static const char *find_gguf(int argc, char **argv, const char *fallback) {
+    for (int i = 1; i < argc; i++) {
+        if (strstr(argv[i], ".gguf")) return argv[i];
+    }
+    return fallback;
+}
+
+static const char *find_whisper(int argc, char **argv, const char *fallback) {
+    for (int i = 1; i < argc; i++) {
+        if (strstr(argv[i], ".bin") && strstr(argv[i], "ggml")) return argv[i];
+    }
+    return fallback;
 }
 
 // ============================================================================
 // MARK: - Main
 // ============================================================================
 
-int main(void) {
+int main(int argc, char **argv) {
+    int local = is_local_mode(argc, argv);
+
     char *grok_key = env_load("GROK_API_KEY");
     char *anthropic_key = env_load("ANTHROPIC_API_KEY");
     char *openai_key = env_load("OPENAI_API_KEY");
 
-    if (!openai_key) {
-        fprintf(stderr, "Error: OPENAI_API_KEY required in .env for STT/TTS\n");
+    // In cloud mode, we need an OpenAI key for STT/TTS
+    if (!local && !openai_key) {
+        fprintf(stderr, "Error: OPENAI_API_KEY required for cloud mode.\n");
+        fprintf(stderr, "Use --local for fully offline mode.\n");
         free(grok_key); free(anthropic_key);
         return 1;
-    }
-
-    // Pick LLM provider — prefer fastest for voice conversation
-    const char *llm_key, *llm_model, *llm_url = NULL;
-    adam_api_format_t llm_fmt;
-
-    if (openai_key) {
-        // GPT-4o-mini is the fastest for short conversational replies
-        llm_key = openai_key;
-        llm_model = "gpt-4o-mini";
-        llm_fmt = ADAM_API_OPENAI;
-    } else if (grok_key) {
-        llm_key = grok_key;
-        llm_model = "grok-3-mini-fast";
-        llm_url = "https://api.x.ai/v1/chat/completions";
-        llm_fmt = ADAM_API_OPENAI;
-    } else if (anthropic_key) {
-        llm_key = anthropic_key;
-        llm_model = "claude-sonnet-4-20250514";
-        llm_fmt = ADAM_API_ANTHROPIC;
-    } else {
-        llm_key = openai_key;
-        llm_model = "gpt-4o-mini";
-        llm_fmt = ADAM_API_OPENAI;
     }
 
     adam_init();
 
     adam_settings_t *s = adam_create_settings();
-    adam_settings_set_provider(s, llm_fmt, llm_key, llm_model);
-    if (llm_url) adam_settings_set_base_url(s, llm_url);
+
+    const char *mode_str;
+    const char *stt_str;
+    const char *tts_str;
+    const char *llm_str;
+
+    if (local) {
+        // ── LOCAL MODE: fully offline ──
+
+        // LLM
+        const char *gguf = find_gguf(argc, argv, "models/Qwen3.5-0.8B-Q8_0.gguf");
+        s->gguf_path = gguf;
+        s->local_gpu_layers = -1;
+        s->local_ctx_size = 4096;
+        llm_str = gguf;
+
+        // STT: whisper.cpp
+        const char *whisper = find_whisper(argc, argv, "models/ggml-base.en.bin");
+        adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, whisper);
+        stt_str = whisper;
+
+        // TTS: OS built-in
+        adam_settings_set_tts(s, ADAM_TTS_SYSTEM, NULL, NULL, NULL, NULL);
+        tts_str = "System (AVSpeechSynthesizer)";
+
+        mode_str = "LOCAL (offline)";
+
+    } else {
+        // ── CLOUD MODE ──
+
+        // LLM: pick fastest available
+        if (openai_key) {
+            adam_settings_set_provider(s, ADAM_API_OPENAI, openai_key, "gpt-4o-mini");
+            llm_str = "gpt-4o-mini (OpenAI)";
+        } else if (grok_key) {
+            adam_settings_set_provider(s, ADAM_API_OPENAI, grok_key, "grok-3-mini-fast");
+            adam_settings_set_base_url(s, "https://api.x.ai/v1/chat/completions");
+            llm_str = "grok-3-mini-fast (xAI)";
+        } else if (anthropic_key) {
+            adam_settings_set_provider(s, ADAM_API_ANTHROPIC, anthropic_key,
+                                       "claude-sonnet-4-20250514");
+            llm_str = "claude-sonnet-4 (Anthropic)";
+        } else {
+            llm_str = "(none)";
+        }
+
+        // STT: OpenAI
+        adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, openai_key,
+                              "gpt-4o-mini-transcribe");
+        stt_str = "gpt-4o-mini-transcribe (cloud)";
+
+        // TTS: voice selection
+        printf("\n");
+        const char *voice = pick_voice();
+        adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, openai_key,
+                              "gpt-4o-mini-tts", voice);
+        s->tts_format = ADAM_AUDIO_MP3;
+        tts_str = voice;
+
+        mode_str = "CLOUD";
+    }
 
     adam_settings_set_identity(s,
         "You are a friendly voice assistant having a natural conversation. "
@@ -216,39 +272,31 @@ int main(void) {
         "Do not use markdown, bullet points, or code. "
         "Speak naturally as if in a real conversation.");
 
-    s->max_tokens = 150;  // voice replies should be short
+    s->max_tokens = 150;
     adam_settings_set_logger(s, on_log, NULL, ADAM_LOG_WARN);
-
-    // STT: OpenAI (gpt-4o-mini-transcribe is faster than whisper-1)
-    adam_settings_set_stt(s, ADAM_STT_CLOUD, NULL, openai_key,
-                          "gpt-4o-mini-transcribe");
-
-    // TTS: voice selection
-    printf("\n");
-    const char *voice = pick_voice();
-
-    adam_settings_set_tts(s, ADAM_TTS_CLOUD, NULL, openai_key,
-                          "gpt-4o-mini-tts", voice);
-    s->tts_format = ADAM_AUDIO_MP3;
 
     printf("\n");
     printf("  ╔══════════════════════════════════════════════╗\n");
     printf("  ║       Adam Voice Conversation                ║\n");
     printf("  ╠══════════════════════════════════════════════╣\n");
-    printf("  ║  LLM:   %-38s║\n", llm_model);
-    printf("  ║  Voice: %-38s║\n", voice);
+    printf("  ║  Mode: %-39s║\n", mode_str);
+    printf("  ║  LLM:  %-39s║\n", llm_str);
+    printf("  ║  STT:  %-39s║\n", stt_str);
+    printf("  ║  TTS:  %-39s║\n", tts_str);
     printf("  ╠══════════════════════════════════════════════╣\n");
     printf("  ║  Speak naturally. Press Enter when done.     ║\n");
     printf("  ║  Press Ctrl+C to exit.                       ║\n");
     printf("  ║  Speak any language — replies match yours.   ║\n");
     printf("  ╚══════════════════════════════════════════════╝\n");
 
-    // Warm up: TLS handshake + audio device initialization on a short
-    // silent phrase. This ensures the first real response plays cleanly.
-    printf("\n  Warming up TTS...");
-    fflush(stdout);
-    adam_tts_speak(s, ".");
-    printf(" ready!\n\n");
+    // Warm up TTS (cloud only — system TTS is instant)
+    if (!local) {
+        printf("\n  Warming up TTS...");
+        fflush(stdout);
+        adam_tts_speak(s, ".");
+        printf(" ready!\n");
+    }
+    printf("\n");
 
     signal(SIGINT, sigint_handler);
 
@@ -260,7 +308,7 @@ int main(void) {
         turn++;
         printf("  [Turn %d] ", turn);
 
-        // 1. Record from microphone
+        // 1. Record
         size_t audio_len = 0;
         uint8_t *audio = record_speech(&audio_len);
 
@@ -273,7 +321,7 @@ int main(void) {
         }
         printf("    Recorded %zu bytes, transcribing...\n", audio_len);
 
-        // 2. Transcribe via Whisper
+        // 2. Transcribe
         arena_t *stt_arena = arena_create(64 * 1024);
         const char *transcript = NULL;
         adam_status_t stt_rc = adam_stt_transcribe(s, stt_arena,
@@ -291,7 +339,6 @@ int main(void) {
 
         printf("    You: \"%s\"\n", transcript);
 
-        // Copy transcript before destroying arena
         char *user_text = strdup(transcript);
         arena_destroy(stt_arena);
 
@@ -312,7 +359,7 @@ int main(void) {
         printf("    Adam: %s\n", r.final_response ? r.final_response : "...");
         total_cost += r.cost_usd;
 
-        // 4. Speak the response
+        // 4. Speak
         if (r.final_response && !g_quit) {
             adam_tts_speak(s, r.final_response);
         }
