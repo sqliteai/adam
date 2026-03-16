@@ -3279,3 +3279,169 @@ int adam_message_attach_file(AdamMessage *msg, const char *path) {
 | **Language FFI** | Universal | Zig/C | Python only | JS/TS only |
 | **Safety** | Manual (arenas help) | Compile-time | GC managed | GC managed |
 | **Ecosystem** | Small (growing) | Small | Massive | Large |
+
+---
+
+## 20. Cross-Device Sync & Mobile Application
+
+### 20.1 Goal
+
+Build an Adam mobile application (iOS and Android) that can continue a session started on desktop, and vice versa. The mobile UI is a chat-like app where Adam posts output and the user can input prompts in text or voice. Sessions can be created, continued, and evolved independently on any device.
+
+### 20.2 Architecture
+
+```
+Desktop (macOS/Linux)         SQLite Cloud            Mobile (iOS/Android)
+┌──────────────┐             ┌─────────────┐         ┌──────────────┐
+│  libadam.a   │             │             │         │  libadam.a   │
+│  (C library) │             │   SQLite    │         │  (C library) │
+│              │◀─── sync ──▶│   Cloud    │◀── sync ─▶│              │
+│  sessions DB │    (CRDT)   │             │  (CRDT)  │  sessions DB │
+│  memory DB   │             │             │         │  memory DB   │
+│  documents   │             └─────────────┘         │  documents   │
+└──────────────┘                                     └──────────────┘
+```
+
+- Same `libadam.a` C library compiled for each platform (arm64-ios, arm64-android, x86_64-linux, arm64-macos)
+- SQLite as the **single source of truth** — all state lives in the database
+- Sync via [sqlite-sync](https://github.com/sqliteai/sqlite-sync) extension (CRDT-based, conflict-free, bidirectional)
+- Offline-first: every device works independently, merges automatically on reconnect
+
+### 20.3 Sync Layer — sqlite-sync
+
+The [sqlite-sync](https://github.com/sqliteai/sqlite-sync) extension adds CRDT-based synchronization to SQLite. Changes are tracked per-column and merged deterministically without manual conflict resolution.
+
+**Integration:**
+
+```c
+// At database open — enable sync on all Adam tables
+cloudsync_init('sessions');
+cloudsync_init('messages');
+cloudsync_init('documents');
+
+// Configure cloud endpoint
+cloudsync_network_init("sqlitecloud://your-project.sqlite.cloud:8860/adam.db");
+cloudsync_network_set_apikey("your-api-key");
+
+// Sync — call periodically or on app foreground/background
+cloudsync_network_sync();
+```
+
+**Public API addition:**
+
+```c
+// adam.h
+adam_status_t adam_sync_init(adam_session_t *sess, const char *connection_string,
+                             const char *api_key);
+adam_status_t adam_sync(adam_session_t *sess);  // bidirectional sync
+```
+
+### 20.4 Schema Changes Required
+
+**1. UUIDv7 primary keys** — replace sequential IDs with globally unique, time-ordered UUIDs so two devices creating sessions simultaneously won't collide:
+
+```sql
+-- Use cloudsync_uuid() for all new rows
+INSERT INTO sessions(id, ...) VALUES(cloudsync_uuid(), ...);
+```
+
+**2. Documents table** — store markdown content (evolution files, bootstrap, memory notes) in SQLite instead of the filesystem:
+
+```sql
+CREATE TABLE documents (
+    id TEXT PRIMARY KEY DEFAULT (cloudsync_uuid()),
+    path TEXT UNIQUE NOT NULL,      -- "evolution/TASK.md", "SOUL.md", etc.
+    content TEXT NOT NULL,
+    device_id TEXT,                  -- which device last edited
+    updated_at INTEGER DEFAULT (unixepoch())
+);
+```
+
+Desktop reads/writes `.md` files and syncs them into this table. Mobile reads/writes only through SQLite. One source of truth.
+
+**3. Device tracking** — identify which device made each change:
+
+```sql
+ALTER TABLE sessions ADD COLUMN device_id TEXT;
+ALTER TABLE messages ADD COLUMN device_id TEXT;
+```
+
+### 20.5 Mobile Build
+
+libadam.a compiles for mobile with the same source:
+
+```makefile
+# iOS (arm64)
+xcrun -sdk iphoneos cc -arch arm64 -std=c11 -O2 \
+    -DADAM_NO_LOCAL -DADAM_NO_CURL \
+    -Isrc -Imodules/sqlite -Imodules/miniaudio \
+    -c src/adam.c src/adam_json.c src/adam_http.c \
+      src/adam_voice.c src/adam_audio.c src/adam_session.c \
+      src/adam_net_apple.m modules/sqlite/sqlite3.c
+
+# Android (arm64, via NDK)
+$NDK/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android34-clang \
+    -std=c11 -O2 -DADAM_NO_LOCAL \
+    -Isrc -Imodules/sqlite -Imodules/miniaudio \
+    -c src/adam.c src/adam_json.c src/adam_http.c \
+      src/adam_voice.c src/adam_audio.c src/adam_session.c \
+      src/adam_net_curl.c modules/sqlite/sqlite3.c
+```
+
+**Platform bindings:**
+- **iOS**: Swift calls C via bridging header. NSURLSession for HTTP (already in adam_net_apple.m). AVAudioSession for mic permissions.
+- **Android**: Kotlin calls C via JNI. OkHttp or the curl-based adam_net_curl.c for HTTP. MediaRecorder for mic.
+
+### 20.6 Mobile Chat UI
+
+Minimal chat interface wrapping the C API:
+
+```
+┌─────────────────────────────────────┐
+│  Adam                          ≡    │
+├─────────────────────────────────────┤
+│                                     │
+│  ┌─────────────────────────────┐    │
+│  │ You: What's the weather?    │    │
+│  └─────────────────────────────┘    │
+│                                     │
+│  ┌─────────────────────────────┐    │
+│  │ 🔧 get_weather("Rome")     │    │
+│  └─────────────────────────────┘    │
+│                                     │
+│  ┌─────────────────────────────┐    │
+│  │ Adam: It's 22°C and sunny   │    │
+│  │ in Rome.                    │    │
+│  └─────────────────────────────┘    │
+│                                     │
+├─────────────────────────────────────┤
+│  [🎤]  Type a message...    [Send]  │
+└─────────────────────────────────────┘
+```
+
+- Messages rendered from `adam_history_t` (loaded from session DB)
+- Text input → `adam_run(settings, history, text)`
+- Mic button → `adam_voice_run(settings, history, audio, len, format)`
+- Tool calls shown as collapsible cards
+- Session picker in nav bar (from `adam_session_list()`)
+- Sync indicator (last sync time, pending changes count)
+
+### 20.7 Task Checklist
+
+- [ ] Add sqlite-sync as submodule (`modules/sqlite-sync/`)
+- [ ] Migrate primary keys to UUIDv7 (`cloudsync_uuid()`)
+- [ ] Add `documents` table for markdown content storage
+- [ ] Add `device_id` column to sessions and messages tables
+- [ ] Add `adam_sync_init()` / `adam_sync()` to public API
+- [ ] Add `adam_documents_read()` / `adam_documents_write()` API
+- [ ] Modify `build_system_prompt()` to read bootstrap files from `documents` table
+- [ ] Modify evolution loop to use `documents` table instead of filesystem
+- [ ] Create iOS Xcode project with Swift bridging header
+- [ ] Create Android project with JNI bindings
+- [ ] Build libadam.a for arm64-ios and arm64-android
+- [ ] Implement chat UI (SwiftUI for iOS, Jetpack Compose for Android)
+- [ ] Add mic permission handling and audio session management
+- [ ] Add sync trigger on app foreground / background transitions
+- [ ] Add session picker and sync status indicator
+- [ ] Test offline-first: create session on device A offline, sync to device B
+- [ ] Test concurrent edits: both devices modify same session, verify CRDT merge
