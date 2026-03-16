@@ -14,6 +14,8 @@ CURL_DIR      := $(ADAM_ROOT)modules/curl
 MBEDTLS_BUILD := $(MBEDTLS_DIR)/build
 CURL_BUILD    := $(CURL_DIR)/build
 MINIAUDIO_DIR := $(ADAM_ROOT)modules/miniaudio
+LLAMA_DIR     := $(ADAM_ROOT)modules/llama.cpp
+LLAMA_BUILD   := $(LLAMA_DIR)/build
 
 # ============================================================================
 # Compiler settings
@@ -23,7 +25,7 @@ SQLITE_DIR := $(ADAM_ROOT)modules/sqlite
 
 CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -O2
 CFLAGS += -Isrc -I$(MINIAUDIO_DIR) -I$(SQLITE_DIR)
-CFLAGS += -DADAM_NO_LOCAL
+CFLAGS += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include
 
 # SQLite compile-time options
 SQLITE_FLAGS := -DSQLITE_THREADSAFE=1 \
@@ -43,20 +45,30 @@ LDFLAGS := -lpthread -lz
 # Platform-specific: Apple (NSURLSession) vs Other (libcurl + mbedtls)
 # ============================================================================
 
+LLAMA_LIBS := $(LLAMA_BUILD)/src/libllama.a \
+              $(LLAMA_BUILD)/ggml/src/libggml.a \
+              $(LLAMA_BUILD)/ggml/src/libggml-cpu.a \
+              $(LLAMA_BUILD)/ggml/src/libggml-base.a
+
 ifeq ($(UNAME_S),Darwin)
   # Apple: use NSURLSession — no curl/mbedtls needed
   CFLAGS  += -DADAM_NO_CURL
   LDFLAGS += -framework Foundation
   LDFLAGS += -framework SystemConfiguration -framework Security
   LDFLAGS += -framework CoreAudio -framework AudioToolbox
+  LDFLAGS += -framework Metal -framework MetalKit -framework Accelerate
+  LDFLAGS += -lstdc++
   NET_SRC := src/adam_net_apple.m
-  LIBS    :=
+  LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
+  LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
+  LIBS    := $(LLAMA_LIBS)
 else ifeq ($(UNAME_S),Linux)
   # Linux: use libcurl + mbedtls
   CFLAGS  += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
-  LDFLAGS += -ldl -lm
+  LDFLAGS += -ldl -lm -lstdc++
   NET_SRC := src/adam_net_curl.c
-  LIBS    := $(CURL_BUILD)/lib/libcurl.a
+  LIBS    := $(LLAMA_LIBS)
+  LIBS    += $(CURL_BUILD)/lib/libcurl.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
@@ -75,7 +87,7 @@ endif
 # ============================================================================
 
 SRCS := src/arena.c src/adam.c src/adam_json.c src/adam_http.c \
-        src/adam_voice.c src/adam_audio.c src/adam_session.c
+        src/adam_voice.c src/adam_audio.c src/adam_session.c src/adam_local.c
 OBJS := $(SRCS:.c=.o)
 
 # SQLite amalgamation (compiled separately with its own flags)
@@ -88,7 +100,7 @@ NET_OBJ := $(basename $(NET_SRC)).o
 # Targets
 # ============================================================================
 
-.PHONY: all clean test live voice talk deps mbedtls curl
+.PHONY: all clean test live voice talk deps mbedtls curl llama
 
 all: libadam.a
 
@@ -140,9 +152,19 @@ test_voice_talk: libadam.a test/test_voice_talk.c
 		test/test_voice_talk.c \
 		-L. -ladam $(LIBS) $(LDFLAGS) -o $@
 
-# --- Dependencies (only needed on non-Apple platforms) ---
+# --- Dependencies ---
 
+deps: llama
+ifeq ($(UNAME_S),Linux)
 deps: mbedtls curl
+endif
+
+llama:
+	cmake -B $(LLAMA_BUILD) -S $(LLAMA_DIR) \
+		-DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF \
+		-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
+		-DCMAKE_BUILD_TYPE=Release
+	cmake --build $(LLAMA_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc) --target llama --target ggml
 
 mbedtls:
 	cd $(MBEDTLS_DIR) && git submodule update --init

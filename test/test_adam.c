@@ -1689,6 +1689,33 @@ TEST(json_parse_anthropic_multi_tool) {
 }
 
 // ============================================================================
+// MARK: - Tests: Local Inference
+// ============================================================================
+
+#ifndef ADAM_NO_LOCAL
+
+TEST(local_missing_gguf) {
+    // Verify graceful failure when GGUF file doesn't exist
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = "/tmp/nonexistent_model.gguf";
+    s->local_gpu_layers = 0;
+    s->local_ctx_size = 512;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Hello");
+
+    // Should fail with LOCAL error, not crash
+    ASSERT_EQ(r.status, ADAM_ERR_LOCAL);
+    ASSERT_NOT_NULL(r.final_response);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+#endif // ADAM_NO_LOCAL
+
+// ============================================================================
 // MARK: - Tests: Session Persistence
 // ============================================================================
 
@@ -2068,6 +2095,12 @@ int main(void) {
     RUN(voice_custom_stt_callback);
     RUN(voice_custom_tts_callback);
     RUN(voice_run_full_pipeline);
+#endif
+
+#ifndef ADAM_NO_LOCAL
+    // --- Local Inference ---
+    printf("\nLocal Inference:\n");
+    RUN(local_missing_gguf);
 #endif
 
 #ifndef ADAM_NO_SQLITE

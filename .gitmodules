@@ -7,3 +7,6 @@
 [submodule "modules/miniaudio"]
 	path = modules/miniaudio
 	url = https://github.com/mackron/miniaudio.git
+[submodule "modules/llama.cpp"]
+	path = modules/llama.cpp
+	url = https://github.com/ggerganov/llama.cpp.git

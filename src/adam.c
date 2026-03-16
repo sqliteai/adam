@@ -160,6 +160,10 @@ adam_settings_t *adam_create_settings(void) {
 void adam_settings_destroy(adam_settings_t *s) {
     if (!s) return;
     adam_net_cleanup(s);
+#ifndef ADAM_NO_LOCAL
+    extern void adam_local_cleanup(adam_settings_t *);
+    adam_local_cleanup(s);
+#endif
     free(s->tools);
     free(s->bootstrap_files);
     free(s);
