@@ -20,6 +20,9 @@
 
 #define AUTH_HDR_EXTRA 32
 
+// System TTS (implemented in adam_tts_system.m / adam_tts_system.c)
+extern adam_status_t adam_tts_system_speak(const char *text, const char *language);
+
 // ============================================================================
 // MARK: - Helpers
 // ============================================================================
@@ -395,6 +398,10 @@ adam_status_t adam_tts_synthesize(adam_settings_t *s, arena_t *arena,
         }
         return rc;
     }
+    case ADAM_TTS_SYSTEM:
+        // System TTS plays directly — can't return audio data.
+        // Use adam_tts_speak() instead for ADAM_TTS_SYSTEM.
+        return ADAM_ERR_NOT_IMPLEMENTED;
     case ADAM_TTS_LOCAL:  return ADAM_ERR_NOT_IMPLEMENTED;
     default:             return ADAM_ERR_INVALID_PARAM;
     }
@@ -411,6 +418,11 @@ adam_status_t adam_audio_play(adam_settings_t *s,
 
 adam_status_t adam_tts_speak(adam_settings_t *s, const char *text) {
     if (!s || !text) return ADAM_ERR_INVALID_PARAM;
+
+    // System TTS: direct playback via OS engine (no audio data round-trip)
+    if (s->tts_backend == ADAM_TTS_SYSTEM && !s->tts_fn) {
+        return adam_tts_system_speak(text, s->stt_language);
+    }
 
     // Streaming path for cloud TTS (overlaps download + playback)
     if (s->tts_backend == ADAM_TTS_CLOUD && !s->tts_fn) {

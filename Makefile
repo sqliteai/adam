@@ -59,14 +59,17 @@ ifeq ($(UNAME_S),Darwin)
   LDFLAGS += -framework Metal -framework MetalKit -framework Accelerate
   LDFLAGS += -lstdc++
   NET_SRC := src/adam_net_apple.m
+  TTS_SYS_SRC := src/adam_tts_system.m
   LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
   LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
+  LDFLAGS += -framework AVFoundation
   LIBS    := $(LLAMA_LIBS)
 else ifeq ($(UNAME_S),Linux)
   # Linux: use libcurl + mbedtls
   CFLAGS  += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
   LDFLAGS += -ldl -lm -lstdc++
   NET_SRC := src/adam_net_curl.c
+  TTS_SYS_SRC := src/adam_tts_system.c
   LIBS    := $(LLAMA_LIBS)
   LIBS    += $(CURL_BUILD)/lib/libcurl.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedtls.a
@@ -76,6 +79,7 @@ else
   # Windows/other: use libcurl + mbedtls
   CFLAGS  += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
   NET_SRC := src/adam_net_curl.c
+  TTS_SYS_SRC := src/adam_tts_system.c
   LIBS    := $(CURL_BUILD)/lib/libcurl.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedx509.a
@@ -93,8 +97,9 @@ OBJS := $(SRCS:.c=.o)
 # SQLite amalgamation (compiled separately with its own flags)
 SQLITE_OBJ := $(SQLITE_DIR)/sqlite3.o
 
-# Net object (may be .c or .m)
-NET_OBJ := $(basename $(NET_SRC)).o
+# Platform-specific objects (may be .c or .m)
+NET_OBJ     := $(basename $(NET_SRC)).o
+TTS_SYS_OBJ := $(basename $(TTS_SYS_SRC)).o
 
 # ============================================================================
 # Targets
@@ -106,7 +111,7 @@ all: libadam.a
 
 # --- Static library ---
 
-libadam.a: $(OBJS) $(NET_OBJ) $(SQLITE_OBJ)
+libadam.a: $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ)
 	ar rcs $@ $^
 
 src/%.o: src/%.c
@@ -116,8 +121,11 @@ src/%.o: src/%.c
 $(SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c
 	$(CC) -std=c11 -O2 $(SQLITE_FLAGS) -c $< -o $@
 
-# Objective-C compilation for Apple net layer
+# Objective-C compilation for Apple platform files
 src/adam_net_apple.o: src/adam_net_apple.m
+	$(CC) $(CFLAGS) -c $< -o $@
+
+src/adam_tts_system.o: src/adam_tts_system.m
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # --- Tests ---
@@ -202,5 +210,5 @@ curl: mbedtls
 # --- Clean ---
 
 clean:
-	rm -f $(OBJS) $(NET_OBJ) $(SQLITE_OBJ) libadam.a test_adam test_live test_chat test_voice_interactive test_voice_talk
+	rm -f $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) libadam.a test_adam test_live test_chat test_voice_interactive test_voice_talk
 	rm -rf test_adam.dSYM test_live.dSYM test_voice_interactive.dSYM test_voice_talk.dSYM

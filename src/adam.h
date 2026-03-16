@@ -234,8 +234,14 @@ typedef enum {
 
 typedef enum {
     ADAM_TTS_NONE               = 0,   // disabled
-    ADAM_TTS_CLOUD              = 1,   // cloud API via libcurl (OpenAI TTS, ElevenLabs, etc.)
+    ADAM_TTS_CLOUD              = 1,   // cloud API (OpenAI TTS, ElevenLabs, etc.)
     ADAM_TTS_LOCAL              = 2,   // local engine (not yet implemented)
+    ADAM_TTS_SYSTEM             = 3,   // OS built-in TTS (always available, no deps):
+                                       //   macOS/iOS: AVSpeechSynthesizer
+                                       //   Android:   android.speech.tts.TextToSpeech
+                                       //   Linux:     espeak-ng / spd-say
+                                       //   Windows:   SAPI (System.Speech)
+                                       //   WASM:      window.speechSynthesis (via tts_fn)
 } adam_tts_backend_t;
 
 // --- Audio format ---
