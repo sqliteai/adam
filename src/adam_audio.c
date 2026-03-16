@@ -10,10 +10,16 @@
 
 #if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
 
-// miniaudio: single-header library — define implementation once
+// miniaudio: single-header library — define implementation once.
+// Only include what Adam needs: device I/O (capture + playback) and
+// decoding (for non-streaming MP3/WAV fallback playback).
+// Disable everything else to minimize compiled size.
 #define MINIAUDIO_IMPLEMENTATION
-#define MA_NO_ENCODING      // we don't need encoding (WAV writing done manually)
-#define MA_NO_GENERATION    // we don't need waveform generation
+#define MA_NO_ENCODING          // no WAV/MP3 encoding (we write WAV manually)
+#define MA_NO_GENERATION        // no waveform/noise generation
+#define MA_NO_RESOURCE_MANAGER  // no async resource loading
+#define MA_NO_NODE_GRAPH        // no audio processing graph
+#define MA_NO_ENGINE            // no high-level engine (we use low-level device API)
 #include "miniaudio.h"
 
 #include "adam.h"
