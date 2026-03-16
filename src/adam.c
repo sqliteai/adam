@@ -6,6 +6,7 @@
 //
 
 #include "adam.h"
+#include "adam_net.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -15,7 +16,7 @@
 #include <pthread.h>
 #endif
 
-#ifndef ADAM_NO_CURL
+#if !defined(ADAM_NO_CURL) && !defined(__APPLE__)
 #include <curl/curl.h>
 #endif
 
@@ -67,14 +68,14 @@ const char *adam_status_string(adam_status_t status) {
 // ============================================================================
 
 adam_status_t adam_init(void) {
-#ifndef ADAM_NO_CURL
+#if !defined(ADAM_NO_CURL) && !defined(__APPLE__)
     curl_global_init(CURL_GLOBAL_DEFAULT);
 #endif
     return ADAM_OK;
 }
 
 void adam_cleanup(void) {
-#ifndef ADAM_NO_CURL
+#if !defined(ADAM_NO_CURL) && !defined(__APPLE__)
     curl_global_cleanup();
 #endif
 }
@@ -148,12 +149,7 @@ adam_settings_t *adam_create_settings(void) {
 
 void adam_settings_destroy(adam_settings_t *s) {
     if (!s) return;
-#ifndef ADAM_NO_CURL
-    // Clean up persistent CURL handles
-    if (s->_curl_llm) { curl_easy_cleanup(s->_curl_llm); s->_curl_llm = NULL; }
-    if (s->_curl_stt) { curl_easy_cleanup(s->_curl_stt); s->_curl_stt = NULL; }
-    if (s->_curl_tts) { curl_easy_cleanup(s->_curl_tts); s->_curl_tts = NULL; }
-#endif
+    adam_net_cleanup(s);
     free(s->tools);
     free(s->bootstrap_files);
     free(s);
@@ -715,7 +711,9 @@ static adam_llm_response_t dispatch_llm(
         };
     }
 
-#ifndef ADAM_NO_CURL
+#if !defined(ADAM_NO_CURL) || defined(__APPLE__)
+    // adam_llm_call_http uses adam_net which has platform-specific backends:
+    // Apple → NSURLSession, Linux/Windows → libcurl
     return adam_llm_call_http(arena, s, msgs, msg_count,
                               s->tools, s->tool_count);
 #else
