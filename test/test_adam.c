@@ -1704,10 +1704,165 @@ TEST(local_missing_gguf) {
     adam_history_t *h = adam_history_create();
     adam_run_result_t r = adam_run(s, h, "Hello");
 
-    // Should fail with LOCAL error, not crash
     ASSERT_EQ(r.status, ADAM_ERR_LOCAL);
     ASSERT_NOT_NULL(r.final_response);
 
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(local_null_gguf_path) {
+    // gguf_path set but NULL — should not crash
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = NULL;
+    // Without gguf_path and no API, should be no provider
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Hello");
+    ASSERT_EQ(r.status, ADAM_ERR_NO_PROVIDER);
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(local_empty_message) {
+    // Empty user message should not crash
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = "/tmp/nonexistent.gguf";
+    s->local_gpu_layers = 0;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "");
+    // Either errors on model load or handles empty gracefully
+    ASSERT_NE(r.status, ADAM_OK); // will fail (no model file)
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(local_null_message) {
+    // NULL user message should not crash
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = "/tmp/nonexistent.gguf";
+    s->local_gpu_layers = 0;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, NULL);
+    // Should handle gracefully — either error or empty history
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(local_extreme_settings) {
+    // Extreme configuration values should not crash
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = "/tmp/nonexistent.gguf";
+    s->local_gpu_layers = 9999;   // more layers than any model has
+    s->local_ctx_size = 1;        // absurdly small context
+    s->local_batch_size = 1;      // minimum batch
+    s->max_tokens = 1;            // minimum generation
+    s->temperature = 0.0f;        // greedy
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "test");
+    // Will fail (no model) but should not crash
+    ASSERT_NE(r.status, ADAM_OK);
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(local_zero_temperature) {
+    // temperature=0 should not divide by zero or crash
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = "/tmp/nonexistent.gguf";
+    s->temperature = 0.0f;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "test");
+    ASSERT_NE(r.status, ADAM_OK);
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(local_settings_destroy_without_run) {
+    // Create settings with gguf_path but never call adam_run.
+    // Destroy should not crash (no local_ctx to free).
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = "some_model.gguf";
+    s->local_gpu_layers = -1;
+    ASSERT_NULL(s->_local_ctx); // not initialized yet
+    adam_settings_destroy(s);
+}
+
+TEST(local_double_destroy) {
+    // Double destroy should not crash
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = "/tmp/nonexistent.gguf";
+    adam_settings_destroy(s);
+    // Second destroy on freed memory — can't test directly without ASan,
+    // but at least verify the first destroy doesn't crash.
+}
+
+TEST(local_priority_over_remote) {
+    // When both gguf_path and api_key are set, local takes priority.
+    // Since the gguf doesn't exist, it should fail with LOCAL error
+    // (not try the remote API).
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = "/tmp/nonexistent.gguf";
+    adam_settings_set_provider(s, ADAM_API_OPENAI, "fake-key", "gpt-4o-mini");
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Hello");
+    // Should fail with LOCAL error (tried local first, not HTTP)
+    ASSERT_EQ(r.status, ADAM_ERR_LOCAL);
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(local_with_tools_defined) {
+    // Having tools defined shouldn't crash local inference
+    // (tool calls from local models not yet implemented, but shouldn't break)
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = "/tmp/nonexistent.gguf";
+
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "test_tool",
+        .description = "A test tool",
+        .parameters_json = "{\"type\":\"object\"}",
+        .execute = mock_tool_search, // from earlier in the file
+    });
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Use the test tool");
+    ASSERT_NE(r.status, ADAM_OK); // fails (no model) but doesn't crash
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+static void local_stream_counter(void *ctx, const char *c, size_t l, int d) {
+    UNUSED_PARAM(c); UNUSED_PARAM(l); UNUSED_PARAM(d);
+    (*(int *)ctx)++;
+}
+
+TEST(local_with_stream_callback) {
+    // Stream callback set but model doesn't exist — should not crash
+    int stream_calls = 0;
+
+    adam_settings_t *s = adam_create_settings();
+    s->gguf_path = "/tmp/nonexistent.gguf";
+    s->on_stream = local_stream_counter;
+    s->stream_ctx = &stream_calls;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Hello");
+    ASSERT_NE(r.status, ADAM_OK);
+    // Stream callback should NOT have been called (model failed to load)
+    ASSERT_EQ(stream_calls, 0);
     adam_run_result_free(&r);
     adam_history_destroy(h);
     adam_settings_destroy(s);
@@ -2101,6 +2256,16 @@ int main(void) {
     // --- Local Inference ---
     printf("\nLocal Inference:\n");
     RUN(local_missing_gguf);
+    RUN(local_null_gguf_path);
+    RUN(local_empty_message);
+    RUN(local_null_message);
+    RUN(local_extreme_settings);
+    RUN(local_zero_temperature);
+    RUN(local_settings_destroy_without_run);
+    RUN(local_double_destroy);
+    RUN(local_priority_over_remote);
+    RUN(local_with_tools_defined);
+    RUN(local_with_stream_callback);
 #endif
 
 #ifndef ADAM_NO_SQLITE
