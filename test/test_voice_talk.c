@@ -23,6 +23,10 @@
 
 #include "adam.h"
 #include "adam_audio.h"
+#ifndef ADAM_NO_LOCAL
+#include "llama.h"
+#include "whisper.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -205,6 +209,16 @@ static const char *find_whisper(int argc, char **argv, const char *fallback) {
 }
 
 // ============================================================================
+// MARK: - Log suppression for local models
+// ============================================================================
+
+#ifndef ADAM_NO_LOCAL
+static void silence_ggml_log(enum ggml_log_level level, const char *text, void *ctx) {
+    UNUSED_PARAM(level); UNUSED_PARAM(text); UNUSED_PARAM(ctx);
+}
+#endif
+
+// ============================================================================
 // MARK: - Main
 // ============================================================================
 
@@ -334,8 +348,60 @@ int main(int argc, char **argv) {
     printf("  ║  Speak any language — replies match yours.   ║\n");
     printf("  ╚══════════════════════════════════════════════╝\n");
 
-    // Warm up TTS (cloud only — system TTS is instant)
-    if (!local) {
+    if (local) {
+#ifndef ADAM_NO_LOCAL
+        // Suppress all whisper.cpp / llama.cpp / ggml verbose logs
+        whisper_log_set(silence_ggml_log, NULL);
+        llama_log_set(silence_ggml_log, NULL);
+#endif
+
+        // Warm up: load whisper + llama models now
+        printf("\n  Loading models...");
+        fflush(stdout);
+
+        // Trigger whisper model load with a tiny silent WAV
+        {
+            arena_t *a = arena_create(64 * 1024);
+            int16_t silence[1600]; // 100ms at 16kHz
+            memset(silence, 0, sizeof(silence));
+
+            // Build a minimal WAV in-place
+            size_t pcm_bytes = sizeof(silence);
+            size_t wav_size = 44 + pcm_bytes;
+            uint8_t *wav = arena_alloc(a, wav_size);
+            if (wav) {
+                memset(wav, 0, wav_size);
+                uint32_t sr = 16000, br = 32000, ds = (uint32_t)pcm_bytes;
+                uint32_t cs = 36 + ds;
+                uint16_t ba = 2, bits = 16, af = 1, ch = 1;
+                uint32_t fs = 16;
+                size_t p = 0;
+                memcpy(wav+p,"RIFF",4);p+=4; memcpy(wav+p,&cs,4);p+=4;
+                memcpy(wav+p,"WAVE",4);p+=4; memcpy(wav+p,"fmt ",4);p+=4;
+                memcpy(wav+p,&fs,4);p+=4; memcpy(wav+p,&af,2);p+=2;
+                memcpy(wav+p,&ch,2);p+=2; memcpy(wav+p,&sr,4);p+=4;
+                memcpy(wav+p,&br,4);p+=4; memcpy(wav+p,&ba,2);p+=2;
+                memcpy(wav+p,&bits,2);p+=2; memcpy(wav+p,"data",4);p+=4;
+                memcpy(wav+p,&ds,4);p+=4;
+                memcpy(wav+p, silence, pcm_bytes);
+
+                const char *text = NULL;
+                adam_stt_transcribe(s, a, wav, wav_size, ADAM_AUDIO_WAV, &text);
+            }
+            arena_destroy(a);
+        }
+
+        // Trigger llama model load with a dummy run
+        {
+            adam_history_t *dummy = adam_history_create();
+            adam_run_result_t r = adam_run(s, dummy, "hi");
+            adam_run_result_free(&r);
+            adam_history_destroy(dummy);
+        }
+
+        printf(" ready!\n");
+    } else {
+        // Cloud: warm up TTS
         printf("\n  Warming up TTS...");
         fflush(stdout);
         adam_tts_speak(s, ".");
