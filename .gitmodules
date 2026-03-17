@@ -13,3 +13,9 @@
 [submodule "modules/whisper.cpp"]
 	path = modules/whisper.cpp
 	url = https://github.com/ggerganov/whisper.cpp.git
+[submodule "modules/sqlite-vector"]
+	path = modules/sqlite-vector
+	url = https://github.com/sqliteai/sqlite-vector.git
+[submodule "modules/sqlite-memory"]
+	path = modules/sqlite-memory
+	url = https://github.com/sqliteai/sqlite-memory.git

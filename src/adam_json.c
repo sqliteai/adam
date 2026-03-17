@@ -6,6 +6,7 @@
 //
 
 #include "adam_json.h"
+#define JSMN_STATIC
 #include "jsmn.h"
 #include <string.h>
 #include <stdio.h>

@@ -36,6 +36,8 @@ extern "C" {
 //   ADAM_NO_PTHREADS   — no pthreads (no thread pool, no voice thread)
 //   ADAM_NO_SQLITE     — no SQLite (no memory, no sessions)
 //   ADAM_NO_VOICE      — no voice subsystem
+//   ADAM_NO_FILESYSTEM — no file_read/file_write/list_directory tools
+//   ADAM_NO_SHELL      — no shell_exec tool
 
 // ============================================================================
 // MARK: - Forward Declarations
@@ -45,8 +47,8 @@ typedef struct adam_settings_t   adam_settings_t;
 typedef struct adam_agent_t      adam_agent_t;
 typedef struct adam_pool_t       adam_pool_t;
 typedef struct adam_memory_t     adam_memory_t;
-typedef struct adam_session_t    adam_session_t;
 typedef struct adam_voice_t      adam_voice_t;
+typedef struct adam_cache_t      adam_cache_t;
 
 // ============================================================================
 // MARK: - Status Codes
@@ -70,6 +72,8 @@ typedef enum {
     ADAM_ERR_NO_PROVIDER         = 14,  // no provider configured
     ADAM_ERR_VOICE               = 15,  // voice subsystem error (STT/TTS)
     ADAM_ERR_NOT_IMPLEMENTED     = 16,  // feature stub (not yet implemented)
+    ADAM_ERR_TIMEOUT             = 17,  // wall-clock timeout exceeded
+    ADAM_ERR_GUARDRAIL           = 18,  // blocked by guardrail callback
 } adam_status_t;
 
 const char *adam_status_string(adam_status_t status);
@@ -354,6 +358,21 @@ typedef adam_llm_response_t (*adam_http_fn)(
 );
 
 // ============================================================================
+// MARK: - Guardrails
+// ============================================================================
+
+// Called before sending messages to the LLM.
+// Return 0 to allow, non-zero to deny (adam_run returns ADAM_ERR_GUARDRAIL).
+typedef int (*adam_guardrail_fn)(void *ctx, const adam_message_t *msgs,
+                                  size_t msg_count);
+
+// Called after receiving an LLM response, before processing.
+// Return 0 to allow, non-zero to deny.
+typedef int (*adam_guardrail_response_fn)(void *ctx, const char *content,
+                                           const adam_tool_call_t *tool_calls,
+                                           size_t tool_call_count);
+
+// ============================================================================
 // MARK: - Run Result
 // ============================================================================
 
@@ -417,6 +436,7 @@ struct adam_settings_t {
     int                  max_iterations;     // default: 25 (max tool-call iterations)
     int                  max_history;        // default: 100 (max messages before compression)
     int                  summarize_threshold;// default: 0 (0 = auto: 75% of context window)
+    int                  timeout_ms;        // default: 0 (0 = no timeout, ms wall-clock)
 
     // --- Arena ---
 
@@ -437,6 +457,15 @@ struct adam_settings_t {
     adam_tool_def_t     *tools;              // default: NULL
     size_t               tool_count;         // default: 0
     size_t               tool_capacity;      // default: 0 (internal)
+
+    // --- Filesystem sandbox ---
+    // Tools that access the filesystem (file_read, file_write, list_directory,
+    // shell_exec) are restricted to these directories. Paths are resolved
+    // with realpath() to prevent symlink/.. escapes.
+
+    const char         **allowed_dirs;       // default: NULL (no filesystem access)
+    size_t               allowed_dir_count;  // default: 0
+    size_t               _allowed_dir_cap;   // internal
 
     // --- Retry policy ---
 
@@ -470,8 +499,26 @@ struct adam_settings_t {
     // --- Memory & sessions ---
 
     adam_memory_t       *memory;             // default: NULL (disabled)
-    adam_session_t      *sessions;           // default: NULL (disabled)
-    const char          *memory_context;     // default: "default"
+    const char          *memory_context;     // default: NULL (search all contexts)
+
+    // --- Memory configuration (embedding & search) ---
+
+    const char          *memory_embedding_provider; // default: "local"
+    const char          *memory_embedding_model;    // default: NULL (must set to enable)
+    const char          *memory_api_key;            // default: NULL (falls back to api_key)
+    const char          *memory_dir;                // default: NULL (markdown output dir)
+    int                  memory_markdown_output;    // default: 0 (1 = write .md files)
+    int                  memory_max_results;        // default: 5 (enrichment results)
+    float                memory_min_score;          // default: 0.0 (0 = sqlite-memory default)
+
+    // --- Session auto-save ---
+
+    const char          *session_id;            // default: NULL (no auto-save)
+    int                  auto_save;             // default: 1 (save after each adam_run when session_id set)
+
+    // --- Memory extraction ---
+
+    int                  memory_extract;        // default: 0 (1 = extract facts after conversation)
 
     // --- Voice (STT / TTS) ---
 
@@ -510,6 +557,17 @@ struct adam_settings_t {
     float                voice_silence_sec;  // default: 1.0 (seconds of silence to trigger STT)
     float                voice_energy_threshold; // default: 0.02 (energy level to detect speech)
 #endif
+
+    // --- Guardrails ---
+
+    adam_guardrail_fn             on_before_send;     // default: NULL
+    void                         *before_send_ctx;    // default: NULL
+    adam_guardrail_response_fn    on_after_receive;    // default: NULL
+    void                         *after_receive_ctx;   // default: NULL
+
+    // --- Response cache ---
+
+    adam_cache_t        *cache;              // default: NULL (no caching)
 
     // --- Cancellation ---
 
@@ -602,6 +660,16 @@ adam_status_t   adam_settings_set_llm_callback(adam_settings_t *s,
 adam_status_t   adam_settings_set_http_callback(adam_settings_t *s,
                     adam_http_fn fn, void *ctx);
 
+// Filesystem sandbox: grant access to a directory for file/shell tools.
+// The path is resolved with realpath(). Can be called multiple times.
+adam_status_t   adam_settings_allow_dir(adam_settings_t *s, const char *dir_path);
+
+// Memory embedding configuration.
+adam_status_t   adam_settings_set_memory(adam_settings_t *s,
+                    const char *embedding_provider,
+                    const char *embedding_model,
+                    const char *api_key);
+
 #if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
 // Enable voice and configure STT backend.
 adam_status_t   adam_settings_set_stt(adam_settings_t *s,
@@ -637,6 +705,7 @@ adam_history_t *adam_history_create(void);
 void            adam_history_destroy(adam_history_t *h);
 void            adam_history_clear(adam_history_t *h);
 size_t          adam_history_count(const adam_history_t *h);
+adam_history_t *adam_history_clone(const adam_history_t *h);
 
 // Append a message. Strings are copied (strdup'd).
 adam_status_t   adam_history_append_user(adam_history_t *h,
@@ -652,9 +721,6 @@ adam_status_t   adam_history_attach(adam_history_t *h,
                     adam_media_type_t type,
                     const uint8_t *data, size_t len,
                     const char *filename);
-adam_status_t   adam_history_attach_file(adam_history_t *h,
-                    const char *file_path);
-
 // Token estimation.
 size_t          adam_history_estimate_tokens(const adam_history_t *h);
 
@@ -676,6 +742,28 @@ adam_run_result_t adam_run(adam_settings_t *settings,
                            const char *user_message);
 
 void            adam_run_result_free(adam_run_result_t *result);
+
+// --- Structured JSON output ---
+
+typedef struct {
+    adam_run_result_t   base;           // embedded base result
+    int                 json_valid;     // 1 if response was valid JSON
+    int                 retries_used;   // retries needed for valid JSON
+} adam_json_result_t;
+
+// Run the agent and validate that the response is valid JSON.
+// Retries up to max_retries times if the response isn't valid JSON.
+// json_hint is appended to the prompt to guide JSON structure (can be NULL).
+adam_json_result_t adam_run_json(adam_settings_t *s, adam_history_t *h,
+                                 const char *user_message,
+                                 const char *json_hint,
+                                 int max_retries);
+
+void            adam_json_result_free(adam_json_result_t *r);
+
+// Extract a string value for a top-level key from a JSON string.
+// Returns a malloc'd string or NULL if key not found. Caller must free().
+char           *adam_json_extract(const char *json, const char *key);
 
 // ============================================================================
 // MARK: - Cancellation
@@ -790,6 +878,9 @@ typedef struct {
 adam_memory_t  *adam_memory_open(const char *db_path);
 void            adam_memory_close(adam_memory_t *mem);
 
+// Apply embedding settings from adam_settings_t. Call after open, before add/search.
+adam_status_t   adam_memory_configure(adam_memory_t *mem, const adam_settings_t *s);
+
 // Ingest knowledge.
 adam_status_t   adam_memory_add(adam_memory_t *mem, const char *text,
                     const char *context, const char *source);
@@ -799,35 +890,39 @@ adam_status_t   adam_memory_add_directory(adam_memory_t *mem,
                     const char *dir_path, const char *context);
 
 // Hybrid search (BM25 + vector similarity).
+// context: NULL = search all, non-NULL = filter by context label.
 // Results are arena-allocated — valid until arena_reset/destroy.
 adam_status_t   adam_memory_search(adam_memory_t *mem, arena_t *arena,
-                    const char *query, int limit,
+                    const char *query, const char *context, int limit,
                     adam_memory_result_t **results, size_t *count);
 
 // Lifecycle.
 adam_status_t   adam_memory_delete_context(adam_memory_t *mem, const char *ctx);
 adam_status_t   adam_memory_clear(adam_memory_t *mem);
 
-// Multi-agent sync via ATTACH DATABASE.
-adam_status_t   adam_memory_attach(adam_memory_t *mem,
-                    const char *remote_db_path, const char *alias);
+// Multi-agent sync.
 adam_status_t   adam_memory_sync(adam_memory_t *mem,
                     const char *alias, const char *context);
 
 // ============================================================================
-// MARK: - Session Persistence (SQLite-backed)
+// MARK: - Session Persistence (stored in the memory database)
 // ============================================================================
 
-adam_session_t *adam_session_open(const char *db_path);
-void            adam_session_close(adam_session_t *sess);
+// Create a new session with a UUIDv7 primary key.
+// Returns the session ID in out_id (must be at least 37 bytes).
+adam_status_t   adam_session_create(adam_memory_t *mem, char *out_id, size_t out_id_size);
 
-adam_status_t   adam_session_save(adam_session_t *sess, const char *session_id,
+adam_status_t   adam_session_save(adam_memory_t *mem, const char *session_id,
                     const adam_history_t *h);
-adam_status_t   adam_session_load(adam_session_t *sess, const char *session_id,
+adam_status_t   adam_session_load(adam_memory_t *mem, const char *session_id,
                     adam_history_t *h);
-adam_status_t   adam_session_list(adam_session_t *sess,
+adam_status_t   adam_session_list(adam_memory_t *mem,
                     char ***ids, size_t *count);
-adam_status_t   adam_session_delete(adam_session_t *sess, const char *session_id);
+adam_status_t   adam_session_delete(adam_memory_t *mem, const char *session_id);
+
+// Mark/unmark a session for sync (sync=1 means include in sync).
+adam_status_t   adam_session_set_sync(adam_memory_t *mem, const char *session_id,
+                    int sync);
 
 #endif // ADAM_NO_SQLITE
 
@@ -854,11 +949,177 @@ float           adam_model_estimate_cost(const char *model,
                     int input_tokens, int output_tokens);
 
 // ============================================================================
+// MARK: - Response Cache
+// ============================================================================
+
+// LRU cache for LLM responses. Keyed on model + message history.
+adam_cache_t   *adam_cache_create(size_t max_entries);
+void            adam_cache_destroy(adam_cache_t *c);
+void            adam_cache_clear(adam_cache_t *c);
+size_t          adam_cache_count(const adam_cache_t *c);
+size_t          adam_cache_hits(const adam_cache_t *c);
+size_t          adam_cache_misses(const adam_cache_t *c);
+
+// ============================================================================
 // MARK: - Token Estimation
 // ============================================================================
 
 // Rough heuristic: ~4 characters per token (good enough for budgeting).
 size_t          adam_estimate_tokens(const char *text, size_t len);
+
+// ============================================================================
+// MARK: - Evolution Loop (self-improving agent)
+// ============================================================================
+
+// Stop reason: why the evolution loop terminated.
+typedef enum {
+    ADAM_EVOLVE_STOP_MAX_ITERS   = 0,   // hit max_iterations
+    ADAM_EVOLVE_STOP_SCORE       = 1,   // reached target_score
+    ADAM_EVOLVE_STOP_PLATEAU     = 2,   // no improvement for plateau_iters
+    ADAM_EVOLVE_STOP_ABORTED     = 3,   // abort_flag was set
+    ADAM_EVOLVE_STOP_ERROR       = 4,   // LLM or eval error
+} adam_evolve_stop_t;
+
+#define ADAM_EVOLVE_MAX_ATTEMPTS 10
+
+// A single attempt in the evolution history.
+typedef struct {
+    char               *output;         // malloc'd: the attempt's output
+    int                 score;          // 0-100
+    int                 iteration;      // which iteration produced this
+} adam_evolve_attempt_t;
+
+// Evaluation callback: scores an attempt.
+// Return 0-100 for a valid score, or -1 to signal error (stops the loop).
+typedef int (*adam_evolve_eval_fn)(void *ctx, const char *output, int iteration);
+
+// Progress callback: called after each iteration (optional).
+typedef void (*adam_evolve_progress_fn)(void *ctx, int iteration, int score,
+                                        int best_score, const char *output);
+
+// Configuration for the evolution loop.
+typedef struct {
+    const char                *task;            // [required] the immutable goal
+    const char                *initial_strategy;// starting approach (or NULL)
+    const char                *metrics;         // scoring criteria description (or NULL)
+
+    int                        max_iterations;  // default: 10
+    int                        target_score;    // default: 95 (stop if score >= this)
+    int                        plateau_iters;   // default: 3 (stop after N iters w/o improvement)
+
+    adam_evolve_eval_fn        eval_fn;         // [required]
+    void                      *eval_ctx;
+    adam_evolve_progress_fn    progress_fn;     // optional
+    void                      *progress_ctx;
+} adam_evolve_config_t;
+
+// Result of the evolution loop.
+typedef struct {
+    adam_status_t              status;
+    adam_evolve_stop_t         stop_reason;
+
+    // Best attempt
+    char                      *best_output;     // malloc'd (or NULL)
+    int                        best_score;
+    int                        best_iteration;
+
+    // Final evolved state
+    char                      *strategy;        // malloc'd: final refined strategy
+    char                      *insights;        // malloc'd: accumulated insights
+
+    // Ring buffer of recent attempts
+    adam_evolve_attempt_t      attempts[ADAM_EVOLVE_MAX_ATTEMPTS];
+    int                        attempt_count;   // stored entries (0..10)
+    int                        attempt_total;   // total iterations completed
+
+    // Stats
+    int                        total_input_tokens;
+    int                        total_output_tokens;
+    float                      total_cost_usd;
+    double                     elapsed_ms;
+} adam_evolve_result_t;
+
+// Create a config with sensible defaults. Caller must set task + eval_fn.
+adam_evolve_config_t adam_evolve_config_defaults(void);
+
+// Run the evolution loop. Blocks until a stop condition is reached.
+adam_evolve_result_t adam_evolve(adam_settings_t *settings,
+                                 const adam_evolve_config_t *config);
+
+// Free all malloc'd strings in the result.
+void adam_evolve_result_free(adam_evolve_result_t *result);
+
+// ============================================================================
+// MARK: - Research Mode (autonomous information gathering)
+// ============================================================================
+
+// Stop reason for the research loop.
+typedef enum {
+    ADAM_RESEARCH_STOP_COMPLETE  = 0,   // agent declared research complete
+    ADAM_RESEARCH_STOP_MAX_ITERS = 1,   // hit max_iterations
+    ADAM_RESEARCH_STOP_ABORTED   = 2,   // abort_flag was set
+    ADAM_RESEARCH_STOP_ERROR     = 3,   // LLM or tool error
+    ADAM_RESEARCH_STOP_CALLBACK  = 4,   // is_complete callback returned 1
+} adam_research_stop_t;
+
+// A single finding from the research.
+typedef struct {
+    char               *content;        // malloc'd: the finding text
+    char               *source;         // malloc'd: source/citation (or NULL)
+    int                 iteration;      // which iteration found this
+} adam_research_finding_t;
+
+// Completeness callback: return 1 if research is done, 0 to continue.
+// Called after each iteration with the current report draft.
+typedef int (*adam_research_complete_fn)(void *ctx, const char *report,
+                                         int iteration);
+
+// Progress callback: called after each iteration.
+typedef void (*adam_research_progress_fn)(void *ctx, int iteration,
+                                          const char *status);
+
+// Configuration for the research loop.
+typedef struct {
+    const char                *question;        // [required] the research question
+    const char                *instructions;    // additional research instructions (or NULL)
+    int                        max_iterations;  // default: 5
+    adam_research_complete_fn   is_complete;     // optional (NULL = agent self-assesses)
+    void                      *complete_ctx;
+    adam_research_progress_fn  on_progress;     // optional
+    void                      *progress_ctx;
+} adam_research_config_t;
+
+// Result of the research loop.
+typedef struct {
+    adam_status_t              status;
+    adam_research_stop_t       stop_reason;
+
+    // Final report (synthesized by LLM from all findings).
+    char                      *report;          // malloc'd (or NULL)
+
+    // Individual findings accumulated across iterations.
+    adam_research_finding_t   *findings;         // malloc'd array (or NULL)
+    size_t                     finding_count;
+
+    // Stats
+    int                        total_iterations;
+    int                        total_input_tokens;
+    int                        total_output_tokens;
+    float                      total_cost_usd;
+    double                     elapsed_ms;
+} adam_research_result_t;
+
+// Create a config with sensible defaults. Caller must set question.
+adam_research_config_t adam_research_config_defaults(void);
+
+// Run the research loop. The agent uses tools from settings to gather
+// information, accumulates findings, and produces a synthesized report.
+// The conversation history persists across iterations.
+adam_research_result_t adam_research(adam_settings_t *settings,
+                                     const adam_research_config_t *config);
+
+// Free all malloc'd strings in the result.
+void adam_research_result_free(adam_research_result_t *result);
 
 // ============================================================================
 // MARK: - Built-in Tools
@@ -881,6 +1142,73 @@ adam_tool_result_t adam_tool_memory_search(arena_t *arena, void *ctx,
 // Add to long-term memory. args: {"text":"...","context":"...","source":"..."}.
 adam_tool_result_t adam_tool_memory_add(arena_t *arena, void *ctx,
                                         const char *args_json, size_t args_len);
+#endif
+
+// Deep research on a topic. ctx must be adam_settings_t*.
+// args: {"question":"...","instructions":"...","max_iterations":5}
+// (instructions, max_iterations optional).
+adam_tool_result_t adam_tool_research(arena_t *arena, void *ctx,
+                                      const char *args_json, size_t args_len);
+
+// --- Multi-agent: invoke a sub-agent as a tool ---
+
+// Context for the sub-agent tool. Embedder allocates and configures this.
+typedef struct {
+    adam_settings_t    *settings;    // sub-agent's settings (required)
+    adam_history_t     *history;     // NULL = fresh each call, non-NULL = persistent
+} adam_agent_tool_ctx_t;
+
+// Sub-agent tool. ctx must be adam_agent_tool_ctx_t*.
+// args: {"message":"..."}.
+adam_tool_result_t adam_tool_agent(arena_t *arena, void *ctx,
+                                   const char *args_json, size_t args_len);
+
+// --- Filesystem tools (ctx must be adam_settings_t* for sandbox checks) ---
+
+// Read a file. args: {"path":"...","max_bytes":65536} (max_bytes optional, default 64KB).
+adam_tool_result_t adam_tool_file_read(arena_t *arena, void *ctx,
+                                       const char *args_json, size_t args_len);
+
+// Write a file. args: {"path":"...","content":"...","append":false} (append optional).
+adam_tool_result_t adam_tool_file_write(arena_t *arena, void *ctx,
+                                        const char *args_json, size_t args_len);
+
+// List directory contents. args: {"path":"..."}.
+adam_tool_result_t adam_tool_list_directory(arena_t *arena, void *ctx,
+                                            const char *args_json, size_t args_len);
+
+// --- Shell execution (ctx must be adam_settings_t* for sandbox checks) ---
+
+// Execute a shell command. args: {"command":"...","timeout":30} (timeout in seconds, default 30).
+// Working directory is restricted to allowed_dirs. stdout+stderr returned.
+adam_tool_result_t adam_tool_shell_exec(arena_t *arena, void *ctx,
+                                        const char *args_json, size_t args_len);
+
+// --- Computation ---
+
+// Evaluate a math expression. args: {"expression":"..."}.
+// Supports: +, -, *, /, %, ^, (), unary minus. No ctx needed.
+adam_tool_result_t adam_tool_calculator(arena_t *arena, void *ctx,
+                                        const char *args_json, size_t args_len);
+
+// --- Web search (ctx must be adam_settings_t* for API key access) ---
+
+// Search the web via Brave Search API. args: {"query":"...","count":5}.
+// Requires brave_api_key set in settings or BRAVE_API_KEY env var.
+adam_tool_result_t adam_tool_web_search(arena_t *arena, void *ctx,
+                                        const char *args_json, size_t args_len);
+
+// --- HTTP ---
+
+// POST JSON to an endpoint. args: {"url":"...","body":"...","headers":{"key":"val"}}.
+adam_tool_result_t adam_tool_http_post(arena_t *arena, void *ctx,
+                                       const char *args_json, size_t args_len);
+
+#ifndef ADAM_NO_SQLITE
+// Execute SQL against a database. ctx must be adam_memory_t*.
+// args: {"sql":"...","params":["..."]} (params optional).
+adam_tool_result_t adam_tool_sql_query(arena_t *arena, void *ctx,
+                                       const char *args_json, size_t args_len);
 #endif
 
 #ifdef __cplusplus

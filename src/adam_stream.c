@@ -16,7 +16,7 @@
 #include "adam_stream.h"
 #include "adam_json.h"
 #include "adam_net.h"
-#define JSMN_HEADER
+#define JSMN_STATIC
 #include "jsmn.h"
 #include <string.h>
 #include <stdio.h>

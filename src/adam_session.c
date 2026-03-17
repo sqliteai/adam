@@ -1,9 +1,9 @@
 //
 //  adam_session.c
-//  Adam — Session persistence via SQLite
+//  Adam — Session persistence (stored in the memory database)
 //
 //  Stores conversation history (messages, tool calls, attachments)
-//  in a SQLite database. All databases are opened in WAL mode.
+//  in the same SQLite database as long-term memory.
 //
 //  Created by Marco Bambini on 16/03/26.
 //
@@ -12,31 +12,14 @@
 
 #include "adam.h"
 #include "sqlite3.h"
+#undef UNUSED_PARAM
+#include "dbmem-utils.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 
-// ============================================================================
-// MARK: - Session struct
-// ============================================================================
-
-struct adam_session_t {
-    sqlite3 *db;
-};
-
-// ============================================================================
-// MARK: - Internal: SQL helpers
-// ============================================================================
-
-static int exec_sql(sqlite3 *db, const char *sql) {
-    char *err = NULL;
-    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
-    if (err) {
-        fprintf(stderr, "[adam_session] SQL error: %s\n", err);
-        sqlite3_free(err);
-    }
-    return rc;
-}
+// Internal: get the sqlite3* handle from adam_memory_t (defined in adam_memory.c)
+extern sqlite3 *adam_memory_db(adam_memory_t *mem);
 
 // ============================================================================
 // MARK: - Internal: tool calls JSON serialization
@@ -200,76 +183,54 @@ static void deserialize_tool_calls(const char *json,
 }
 
 // ============================================================================
-// MARK: - Open / Close
+// MARK: - Create
 // ============================================================================
 
-adam_session_t *adam_session_open(const char *db_path) {
-    if (!db_path) return NULL;
+adam_status_t adam_session_create(adam_memory_t *mem, char *out_id,
+                                  size_t out_id_size) {
+    if (!mem || !out_id || out_id_size < DBMEM_UUID_STR_MAXLEN)
+        return ADAM_ERR_INVALID_PARAM;
 
-    adam_session_t *sess = calloc(1, sizeof(adam_session_t));
-    if (!sess) return NULL;
+    sqlite3 *db = adam_memory_db(mem);
+    if (!db) return ADAM_ERR_SQLITE;
 
-    int rc = sqlite3_open(db_path, &sess->db);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "[adam_session] sqlite3_open failed: %s\n",
-                sqlite3_errmsg(sess->db));
-        sqlite3_close(sess->db);
-        free(sess);
-        return NULL;
-    }
+    // Generate UUIDv7
+    char uuid[DBMEM_UUID_STR_MAXLEN];
+    dbmem_uuid_v7(uuid);
 
-    // WAL mode for better concurrent performance
-    exec_sql(sess->db, "PRAGMA journal_mode=WAL");
-    exec_sql(sess->db, "PRAGMA synchronous=NORMAL");
+    // Insert session row
+    sqlite3_stmt *ins = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "INSERT INTO sessions(id) VALUES(?1)", -1, &ins, NULL);
+    if (rc != SQLITE_OK) return ADAM_ERR_SQLITE;
 
-    // Create tables
-    exec_sql(sess->db,
-        "CREATE TABLE IF NOT EXISTS sessions("
-        "  id TEXT PRIMARY KEY,"
-        "  created_at INTEGER DEFAULT (unixepoch()),"
-        "  updated_at INTEGER DEFAULT (unixepoch())"
-        ")");
+    sqlite3_bind_text(ins, 1, uuid, -1, SQLITE_TRANSIENT);
+    rc = sqlite3_step(ins);
+    sqlite3_finalize(ins);
 
-    exec_sql(sess->db,
-        "CREATE TABLE IF NOT EXISTS messages("
-        "  session_id TEXT NOT NULL,"
-        "  idx INTEGER NOT NULL,"
-        "  role INTEGER NOT NULL,"
-        "  content TEXT,"
-        "  content_len INTEGER DEFAULT 0,"
-        "  tool_call_id TEXT,"
-        "  tool_calls_json TEXT,"
-        "  created_at INTEGER DEFAULT (unixepoch()),"
-        "  PRIMARY KEY (session_id, idx),"
-        "  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE"
-        ")");
+    if (rc != SQLITE_DONE) return ADAM_ERR_SQLITE;
 
-    // Enable foreign keys
-    exec_sql(sess->db, "PRAGMA foreign_keys=ON");
-
-    return sess;
-}
-
-void adam_session_close(adam_session_t *sess) {
-    if (!sess) return;
-    if (sess->db) sqlite3_close(sess->db);
-    free(sess);
+    memcpy(out_id, uuid, DBMEM_UUID_STR_MAXLEN);
+    return ADAM_OK;
 }
 
 // ============================================================================
 // MARK: - Save
 // ============================================================================
 
-adam_status_t adam_session_save(adam_session_t *sess, const char *session_id,
+adam_status_t adam_session_save(adam_memory_t *mem, const char *session_id,
                                 const adam_history_t *h) {
-    if (!sess || !session_id || !h) return ADAM_ERR_INVALID_PARAM;
+    if (!mem || !session_id || !h) return ADAM_ERR_INVALID_PARAM;
+
+    sqlite3 *db = adam_memory_db(mem);
+    if (!db) return ADAM_ERR_SQLITE;
 
     // Begin transaction
-    exec_sql(sess->db, "BEGIN IMMEDIATE");
+    sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
 
     // Upsert session row
     sqlite3_stmt *upsert;
-    int rc = sqlite3_prepare_v2(sess->db,
+    int rc = sqlite3_prepare_v2(db,
         "INSERT INTO sessions(id, updated_at) VALUES(?1, unixepoch()) "
         "ON CONFLICT(id) DO UPDATE SET updated_at=unixepoch()",
         -1, &upsert, NULL);
@@ -280,7 +241,7 @@ adam_status_t adam_session_save(adam_session_t *sess, const char *session_id,
 
     // Delete existing messages for this session
     sqlite3_stmt *del;
-    rc = sqlite3_prepare_v2(sess->db,
+    rc = sqlite3_prepare_v2(db,
         "DELETE FROM messages WHERE session_id=?1", -1, &del, NULL);
     if (rc != SQLITE_OK) goto fail;
     sqlite3_bind_text(del, 1, session_id, -1, SQLITE_STATIC);
@@ -289,7 +250,7 @@ adam_status_t adam_session_save(adam_session_t *sess, const char *session_id,
 
     // Insert all current messages
     sqlite3_stmt *ins;
-    rc = sqlite3_prepare_v2(sess->db,
+    rc = sqlite3_prepare_v2(db,
         "INSERT INTO messages(session_id, idx, role, content, content_len, "
         "tool_call_id, tool_calls_json) VALUES(?1,?2,?3,?4,?5,?6,?7)",
         -1, &ins, NULL);
@@ -318,11 +279,11 @@ adam_status_t adam_session_save(adam_session_t *sess, const char *session_id,
     }
     sqlite3_finalize(ins);
 
-    exec_sql(sess->db, "COMMIT");
+    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
     return ADAM_OK;
 
 fail:
-    exec_sql(sess->db, "ROLLBACK");
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
     return ADAM_ERR_SQLITE;
 }
 
@@ -330,13 +291,16 @@ fail:
 // MARK: - Load
 // ============================================================================
 
-adam_status_t adam_session_load(adam_session_t *sess, const char *session_id,
+adam_status_t adam_session_load(adam_memory_t *mem, const char *session_id,
                                 adam_history_t *h) {
-    if (!sess || !session_id || !h) return ADAM_ERR_INVALID_PARAM;
+    if (!mem || !session_id || !h) return ADAM_ERR_INVALID_PARAM;
+
+    sqlite3 *db = adam_memory_db(mem);
+    if (!db) return ADAM_ERR_SQLITE;
 
     // Check session exists
     sqlite3_stmt *chk;
-    int rc = sqlite3_prepare_v2(sess->db,
+    int rc = sqlite3_prepare_v2(db,
         "SELECT 1 FROM sessions WHERE id=?1", -1, &chk, NULL);
     if (rc != SQLITE_OK) return ADAM_ERR_SQLITE;
     sqlite3_bind_text(chk, 1, session_id, -1, SQLITE_STATIC);
@@ -349,7 +313,7 @@ adam_status_t adam_session_load(adam_session_t *sess, const char *session_id,
 
     // Load messages in order
     sqlite3_stmt *sel;
-    rc = sqlite3_prepare_v2(sess->db,
+    rc = sqlite3_prepare_v2(db,
         "SELECT role, content, tool_call_id, tool_calls_json "
         "FROM messages WHERE session_id=?1 ORDER BY idx",
         -1, &sel, NULL);
@@ -411,15 +375,18 @@ adam_status_t adam_session_load(adam_session_t *sess, const char *session_id,
 // MARK: - List Sessions
 // ============================================================================
 
-adam_status_t adam_session_list(adam_session_t *sess,
+adam_status_t adam_session_list(adam_memory_t *mem,
                                 char ***ids, size_t *count) {
-    if (!sess || !ids || !count) return ADAM_ERR_INVALID_PARAM;
+    if (!mem || !ids || !count) return ADAM_ERR_INVALID_PARAM;
     *ids = NULL;
     *count = 0;
 
+    sqlite3 *db = adam_memory_db(mem);
+    if (!db) return ADAM_ERR_SQLITE;
+
     // Count sessions
     sqlite3_stmt *cnt;
-    int rc = sqlite3_prepare_v2(sess->db,
+    int rc = sqlite3_prepare_v2(db,
         "SELECT COUNT(*) FROM sessions", -1, &cnt, NULL);
     if (rc != SQLITE_OK) return ADAM_ERR_SQLITE;
     sqlite3_step(cnt);
@@ -432,7 +399,7 @@ adam_status_t adam_session_list(adam_session_t *sess,
     if (!arr) return ADAM_ERR_ALLOC;
 
     sqlite3_stmt *sel;
-    rc = sqlite3_prepare_v2(sess->db,
+    rc = sqlite3_prepare_v2(db,
         "SELECT id FROM sessions ORDER BY updated_at DESC", -1, &sel, NULL);
     if (rc != SQLITE_OK) { free(arr); return ADAM_ERR_SQLITE; }
 
@@ -440,7 +407,7 @@ adam_status_t adam_session_list(adam_session_t *sess,
     while (sqlite3_step(sel) == SQLITE_ROW && i < n) {
         const char *id = (const char *)sqlite3_column_text(sel, 0);
         arr[i] = strdup(id ? id : "");
-        if (!arr[i]) break; // OOM — return what we have
+        if (!arr[i]) break;
         i++;
     }
     sqlite3_finalize(sel);
@@ -454,17 +421,43 @@ adam_status_t adam_session_list(adam_session_t *sess,
 // MARK: - Delete Session
 // ============================================================================
 
-adam_status_t adam_session_delete(adam_session_t *sess, const char *session_id) {
-    if (!sess || !session_id) return ADAM_ERR_INVALID_PARAM;
+adam_status_t adam_session_delete(adam_memory_t *mem, const char *session_id) {
+    if (!mem || !session_id) return ADAM_ERR_INVALID_PARAM;
+
+    sqlite3 *db = adam_memory_db(mem);
+    if (!db) return ADAM_ERR_SQLITE;
 
     // Foreign key cascade deletes messages automatically
     sqlite3_stmt *del;
-    int rc = sqlite3_prepare_v2(sess->db,
+    int rc = sqlite3_prepare_v2(db,
         "DELETE FROM sessions WHERE id=?1", -1, &del, NULL);
     if (rc != SQLITE_OK) return ADAM_ERR_SQLITE;
     sqlite3_bind_text(del, 1, session_id, -1, SQLITE_STATIC);
     rc = sqlite3_step(del);
     sqlite3_finalize(del);
+
+    return (rc == SQLITE_DONE) ? ADAM_OK : ADAM_ERR_SQLITE;
+}
+
+// ============================================================================
+// MARK: - Sync Flag
+// ============================================================================
+
+adam_status_t adam_session_set_sync(adam_memory_t *mem, const char *session_id,
+                                    int sync) {
+    if (!mem || !session_id) return ADAM_ERR_INVALID_PARAM;
+
+    sqlite3 *db = adam_memory_db(mem);
+    if (!db) return ADAM_ERR_SQLITE;
+
+    sqlite3_stmt *upd;
+    int rc = sqlite3_prepare_v2(db,
+        "UPDATE sessions SET sync=?2 WHERE id=?1", -1, &upd, NULL);
+    if (rc != SQLITE_OK) return ADAM_ERR_SQLITE;
+    sqlite3_bind_text(upd, 1, session_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(upd, 2, sync ? 1 : 0);
+    rc = sqlite3_step(upd);
+    sqlite3_finalize(upd);
 
     return (rc == SQLITE_DONE) ? ADAM_OK : ADAM_ERR_SQLITE;
 }

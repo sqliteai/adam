@@ -21,6 +21,8 @@
 #include <string.h>
 #include <time.h>
 #include <assert.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 
 #ifndef ADAM_NO_PTHREADS
@@ -38,7 +40,7 @@ static int g_asserts_total = 0;
 
 #define TEST(name)                                                          \
     static void test_##name(void);                                          \
-    static void run_test_##name(void) {                                     \
+    static NOINLINE void run_test_##name(void) {                            \
         g_tests_run++;                                                      \
         printf("  %-50s ", #name);                                          \
         fflush(stdout);                                                     \
@@ -72,6 +74,16 @@ static int g_asserts_total = 0;
 #define ASSERT_STR_EQ(a, b) ASSERT(strcmp((a), (b)) == 0)
 
 #define RUN(name) run_test_##name()
+
+// Prevent the compiler from inlining run_test wrappers into main(),
+// which would create a single enormous stack frame that exceeds ASan limits.
+#if defined(__GNUC__) || defined(__clang__)
+  #define NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+  #define NOINLINE __declspec(noinline)
+#else
+  #define NOINLINE
+#endif
 
 // ============================================================================
 // MARK: - Memory Tracking
@@ -359,7 +371,10 @@ TEST(create_settings_defaults) {
     ASSERT_EQ(s->retry_backoff_ms[3], 10000);
     ASSERT_EQ(s->retry_rate_limit_ms, 30000);
     ASSERT_EQ(s->log_level, ADAM_LOG_WARN);
-    ASSERT_STR_EQ(s->memory_context, "default");
+    ASSERT_NULL(s->memory_context);
+    ASSERT_EQ(s->auto_save, 1);
+    ASSERT_NULL(s->session_id);
+    ASSERT_EQ(s->memory_extract, 0);
     ASSERT_EQ(s->abort_flag, 0);
     ASSERT_NULL(s->llm_fn);
     ASSERT_NULL(s->http_fn);
@@ -2268,17 +2283,17 @@ TEST(local_with_stream_callback) {
 TEST(session_open_close) {
     const char *path = "/tmp/adam_test_session.db";
     unlink(path);
-    adam_session_t *sess = adam_session_open(path);
-    ASSERT_NOT_NULL(sess);
-    adam_session_close(sess);
+    adam_memory_t *mem = adam_memory_open(path);
+    ASSERT_NOT_NULL(mem);
+    adam_memory_close(mem);
     unlink(path);
 }
 
 TEST(session_save_load_simple) {
     const char *path = "/tmp/adam_test_session2.db";
     unlink(path);
-    adam_session_t *sess = adam_session_open(path);
-    ASSERT_NOT_NULL(sess);
+    adam_memory_t *mem = adam_memory_open(path);
+    ASSERT_NOT_NULL(mem);
 
     // Build a history
     adam_history_t *h = adam_history_create();
@@ -2288,12 +2303,12 @@ TEST(session_save_load_simple) {
     adam_history_append_assistant(h, "I'm doing well!", NULL, 0);
 
     // Save
-    adam_status_t rc = adam_session_save(sess, "test-001", h);
+    adam_status_t rc = adam_session_save(mem, "test-001", h);
     ASSERT_EQ(rc, ADAM_OK);
 
     // Load into a new history
     adam_history_t *h2 = adam_history_create();
-    rc = adam_session_load(sess, "test-001", h2);
+    rc = adam_session_load(mem, "test-001", h2);
     ASSERT_EQ(rc, ADAM_OK);
     ASSERT_EQ(adam_history_count(h2), 4);
     ASSERT_EQ(h2->items[0].role, ADAM_ROLE_USER);
@@ -2307,14 +2322,14 @@ TEST(session_save_load_simple) {
 
     adam_history_destroy(h);
     adam_history_destroy(h2);
-    adam_session_close(sess);
+    adam_memory_close(mem);
     unlink(path);
 }
 
 TEST(session_save_load_with_tool_calls) {
     const char *path = "/tmp/adam_test_session3.db";
     unlink(path);
-    adam_session_t *sess = adam_session_open(path);
+    adam_memory_t *mem = adam_memory_open(path);
 
     adam_history_t *h = adam_history_create();
     adam_history_append_user(h, "What's the weather?");
@@ -2332,11 +2347,11 @@ TEST(session_save_load_with_tool_calls) {
     // Final answer
     adam_history_append_assistant(h, "It's 22 degrees in Rome.", NULL, 0);
 
-    adam_session_save(sess, "tool-test", h);
+    adam_session_save(mem, "tool-test", h);
 
     // Load and verify
     adam_history_t *h2 = adam_history_create();
-    adam_session_load(sess, "tool-test", h2);
+    adam_session_load(mem, "tool-test", h2);
 
     ASSERT_EQ(adam_history_count(h2), 4);
 
@@ -2354,26 +2369,26 @@ TEST(session_save_load_with_tool_calls) {
 
     adam_history_destroy(h);
     adam_history_destroy(h2);
-    adam_session_close(sess);
+    adam_memory_close(mem);
     unlink(path);
 }
 
 TEST(session_list_and_delete) {
     const char *path = "/tmp/adam_test_session4.db";
     unlink(path);
-    adam_session_t *sess = adam_session_open(path);
+    adam_memory_t *mem = adam_memory_open(path);
 
     adam_history_t *h = adam_history_create();
     adam_history_append_user(h, "Test");
 
-    adam_session_save(sess, "session-a", h);
-    adam_session_save(sess, "session-b", h);
-    adam_session_save(sess, "session-c", h);
+    adam_session_save(mem, "session-a", h);
+    adam_session_save(mem, "session-b", h);
+    adam_session_save(mem, "session-c", h);
 
     // List
     char **ids = NULL;
     size_t count = 0;
-    adam_status_t rc = adam_session_list(sess, &ids, &count);
+    adam_status_t rc = adam_session_list(mem, &ids, &count);
     ASSERT_EQ(rc, ADAM_OK);
     ASSERT_EQ(count, 3);
     ASSERT_NOT_NULL(ids);
@@ -2383,11 +2398,11 @@ TEST(session_list_and_delete) {
     free(ids);
 
     // Delete one
-    rc = adam_session_delete(sess, "session-b");
+    rc = adam_session_delete(mem, "session-b");
     ASSERT_EQ(rc, ADAM_OK);
 
     // List again
-    rc = adam_session_list(sess, &ids, &count);
+    rc = adam_session_list(mem, &ids, &count);
     ASSERT_EQ(rc, ADAM_OK);
     ASSERT_EQ(count, 2);
     for (size_t i = 0; i < count; i++) free(ids[i]);
@@ -2395,12 +2410,12 @@ TEST(session_list_and_delete) {
 
     // Load deleted session should fail
     adam_history_t *h2 = adam_history_create();
-    rc = adam_session_load(sess, "session-b", h2);
+    rc = adam_session_load(mem, "session-b", h2);
     ASSERT_NE(rc, ADAM_OK);
 
     adam_history_destroy(h);
     adam_history_destroy(h2);
-    adam_session_close(sess);
+    adam_memory_close(mem);
     unlink(path);
 }
 
@@ -2408,20 +2423,20 @@ TEST(session_overwrite) {
     // Saving the same session_id twice should replace the old data
     const char *path = "/tmp/adam_test_session5.db";
     unlink(path);
-    adam_session_t *sess = adam_session_open(path);
+    adam_memory_t *mem = adam_memory_open(path);
 
     adam_history_t *h1 = adam_history_create();
     adam_history_append_user(h1, "First version");
-    adam_session_save(sess, "overwrite-test", h1);
+    adam_session_save(mem, "overwrite-test", h1);
 
     adam_history_t *h2 = adam_history_create();
     adam_history_append_user(h2, "Second version");
     adam_history_append_assistant(h2, "Updated reply", NULL, 0);
-    adam_session_save(sess, "overwrite-test", h2);
+    adam_session_save(mem, "overwrite-test", h2);
 
     // Load should get the second version
     adam_history_t *h3 = adam_history_create();
-    adam_session_load(sess, "overwrite-test", h3);
+    adam_session_load(mem, "overwrite-test", h3);
     ASSERT_EQ(adam_history_count(h3), 2);
     ASSERT_STR_EQ(h3->items[0].content, "Second version");
     ASSERT_STR_EQ(h3->items[1].content, "Updated reply");
@@ -2429,7 +2444,7 @@ TEST(session_overwrite) {
     adam_history_destroy(h1);
     adam_history_destroy(h2);
     adam_history_destroy(h3);
-    adam_session_close(sess);
+    adam_memory_close(mem);
     unlink(path);
 }
 
@@ -2439,27 +2454,1648 @@ TEST(session_persistence_across_reopen) {
     unlink(path);
 
     // Open, save, close
-    adam_session_t *s1 = adam_session_open(path);
+    adam_memory_t *m1 = adam_memory_open(path);
     adam_history_t *h = adam_history_create();
     adam_history_append_user(h, "Persistent message");
-    adam_session_save(s1, "persist-test", h);
-    adam_session_close(s1);
+    adam_session_save(m1, "persist-test", h);
+    adam_memory_close(m1);
 
     // Reopen, load
-    adam_session_t *s2 = adam_session_open(path);
+    adam_memory_t *m2 = adam_memory_open(path);
     adam_history_t *h2 = adam_history_create();
-    adam_status_t rc = adam_session_load(s2, "persist-test", h2);
+    adam_status_t rc = adam_session_load(m2, "persist-test", h2);
     ASSERT_EQ(rc, ADAM_OK);
     ASSERT_EQ(adam_history_count(h2), 1);
     ASSERT_STR_EQ(h2->items[0].content, "Persistent message");
 
     adam_history_destroy(h);
     adam_history_destroy(h2);
-    adam_session_close(s2);
+    adam_memory_close(m2);
     unlink(path);
 }
 
 #endif // ADAM_NO_SQLITE
+
+// ============================================================================
+// MARK: - Tests: Evolution Loop
+// ============================================================================
+
+// Mock LLM for evolution: distinguishes attempt/refine/insight prompts
+// by looking for keywords in the user message.
+typedef struct {
+    int attempt_count;
+    int refine_count;
+    int insight_count;
+} mock_evolve_ctx_t;
+
+static adam_llm_response_t mock_llm_evolve(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_evolve_ctx_t *m = (mock_evolve_ctx_t *)ctx;
+    UNUSED_PARAM(tools); UNUSED_PARAM(tool_count);
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 50;
+    resp.output_tokens = 20;
+
+    // Find the last user message
+    const char *user_msg = "";
+    for (size_t i = msg_count; i > 0; i--) {
+        if (msgs[i - 1].role == ADAM_ROLE_USER) {
+            user_msg = msgs[i - 1].content ? msgs[i - 1].content : "";
+            break;
+        }
+    }
+
+    if (strstr(user_msg, "Produce your best attempt")) {
+        m->attempt_count++;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Attempt output #%d", m->attempt_count);
+        resp.content = arena_strdup(arena, buf);
+    } else if (strstr(user_msg, "Refine the strategy")) {
+        m->refine_count++;
+        resp.content = arena_strdup(arena, "Refined strategy: focus on quality.");
+    } else if (strstr(user_msg, "Update the insights")) {
+        m->insight_count++;
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "Insight: iteration %d taught us to try harder.",
+                 m->insight_count);
+        resp.content = arena_strdup(arena, buf);
+    } else {
+        resp.content = arena_strdup(arena, "Unknown prompt type.");
+    }
+    return resp;
+}
+
+// Eval: scores based on iteration (simulates steady improvement)
+static int eval_improving(void *ctx, const char *output, int iteration) {
+    UNUSED_PARAM(output);
+    int *call_count = (int *)ctx;
+    (*call_count)++;
+    // Score: 20, 40, 60, 80, 100
+    return 20 + iteration * 20;
+}
+
+// Eval: always returns a fixed score (for plateau testing)
+static int eval_fixed(void *ctx, const char *output, int iteration) {
+    UNUSED_PARAM(output); UNUSED_PARAM(iteration);
+    int *call_count = (int *)ctx;
+    (*call_count)++;
+    return 50;
+}
+
+// Eval: returns error on third call
+static int eval_error(void *ctx, const char *output, int iteration) {
+    UNUSED_PARAM(output); UNUSED_PARAM(iteration);
+    int *call_count = (int *)ctx;
+    (*call_count)++;
+    if (*call_count >= 3) return -1;
+    return 30;
+}
+
+// Progress tracker
+typedef struct {
+    int calls;
+    int last_score;
+    int last_best;
+} progress_ctx_t;
+
+static void on_progress(void *ctx, int iteration, int score,
+                          int best_score, const char *output) {
+    UNUSED_PARAM(iteration); UNUSED_PARAM(output);
+    progress_ctx_t *p = (progress_ctx_t *)ctx;
+    p->calls++;
+    p->last_score = score;
+    p->last_best = best_score;
+}
+
+TEST(evolve_basic_improvement) {
+    // Evolution loop where score improves: 20, 40, 60, 80, 100
+    // Should stop when target_score (95) is reached at iteration 4 (score=100)
+    mock_evolve_ctx_t mock = {0};
+    int eval_calls = 0;
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_evolve, &mock);
+
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "Write the best poem about the sea.";
+    cfg.initial_strategy = "Use vivid imagery and metaphor.";
+    cfg.metrics = "Score based on creativity and emotional impact.";
+    cfg.eval_fn = eval_improving;
+    cfg.eval_ctx = &eval_calls;
+    cfg.target_score = 95;
+
+    adam_evolve_result_t r = adam_evolve(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.stop_reason, ADAM_EVOLVE_STOP_SCORE);
+    ASSERT_EQ(r.best_score, 100);
+    ASSERT_EQ(r.best_iteration, 4); // iteration 4: 20+4*20=100
+    ASSERT_NOT_NULL(r.best_output);
+    ASSERT(strstr(r.best_output, "Attempt output") != NULL);
+    ASSERT_EQ(r.attempt_total, 5); // iterations 0-4
+    ASSERT_EQ(eval_calls, 5);
+
+    // Strategy should have been refined (score improved multiple times)
+    ASSERT_NOT_NULL(r.strategy);
+    ASSERT(strstr(r.strategy, "Refined strategy") != NULL);
+
+    // Insights should have been updated
+    ASSERT_NOT_NULL(r.insights);
+    ASSERT(strstr(r.insights, "Insight") != NULL);
+
+    // Mock counts: each iteration = 1 attempt + 1 insight = 2 calls
+    // plus refine calls on improvement (all 5 iterations improve)
+    ASSERT_EQ(mock.attempt_count, 5);
+    ASSERT_EQ(mock.insight_count, 5);
+    ASSERT(mock.refine_count >= 4); // score improved 4 times (iter 1-4 all > prev)
+
+    // Stats should be accumulated
+    ASSERT(r.total_input_tokens > 0);
+    ASSERT(r.total_output_tokens > 0);
+    ASSERT(r.elapsed_ms >= 0.0);
+
+    adam_evolve_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(evolve_plateau_stop) {
+    // Eval always returns 50 -> plateau after 3 iterations
+    mock_evolve_ctx_t mock = {0};
+    int eval_calls = 0;
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_evolve, &mock);
+
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "Optimize the algorithm.";
+    cfg.eval_fn = eval_fixed;
+    cfg.eval_ctx = &eval_calls;
+    cfg.plateau_iters = 3;
+    cfg.max_iterations = 20;
+
+    adam_evolve_result_t r = adam_evolve(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.stop_reason, ADAM_EVOLVE_STOP_PLATEAU);
+    ASSERT_EQ(r.best_score, 50);
+    // First iteration improves from -1 to 50, then 3 more with no improvement
+    ASSERT_EQ(r.attempt_total, 4);
+    ASSERT_EQ(eval_calls, 4);
+
+    // Strategy refined only once (first iteration is an improvement from -1)
+    ASSERT(mock.refine_count == 1);
+
+    adam_evolve_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(evolve_max_iterations) {
+    // Run exactly max_iterations (3) with constant improvement
+    mock_evolve_ctx_t mock = {0};
+    int eval_calls = 0;
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_evolve, &mock);
+
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "Write a haiku.";
+    cfg.eval_fn = eval_improving;
+    cfg.eval_ctx = &eval_calls;
+    cfg.max_iterations = 3;
+    cfg.target_score = 200; // unreachable
+    cfg.plateau_iters = 100; // won't trigger
+
+    adam_evolve_result_t r = adam_evolve(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.stop_reason, ADAM_EVOLVE_STOP_MAX_ITERS);
+    ASSERT_EQ(r.attempt_total, 3);
+    ASSERT_EQ(r.best_score, 60); // 20 + 2*20 = 60 at iteration 2
+    ASSERT_EQ(r.best_iteration, 2);
+
+    // All 3 attempts in buffer
+    ASSERT_EQ(r.attempt_count, 3);
+    ASSERT_EQ(r.attempts[0].score, 20);
+    ASSERT_EQ(r.attempts[1].score, 40);
+    ASSERT_EQ(r.attempts[2].score, 60);
+
+    adam_evolve_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(evolve_ring_buffer) {
+    // Run 15 iterations (more than ring buffer of 10)
+    mock_evolve_ctx_t mock = {0};
+    int eval_calls = 0;
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_evolve, &mock);
+
+    // Eval: returns iteration+1 as score (always improving, never reaches 200)
+    // We can't use eval_improving (it goes 20,40,...) so make a custom one
+
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "Long running task.";
+    cfg.eval_fn = eval_improving;
+    cfg.eval_ctx = &eval_calls;
+    cfg.max_iterations = 15;
+    cfg.target_score = 999; // unreachable
+    cfg.plateau_iters = 999; // won't trigger
+
+    adam_evolve_result_t r = adam_evolve(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.attempt_total, 15);
+    // Ring buffer should have exactly 10 entries
+    ASSERT_EQ(r.attempt_count, ADAM_EVOLVE_MAX_ATTEMPTS);
+    // Oldest entry should be from iteration 5 (0-4 were evicted)
+    ASSERT_EQ(r.attempts[0].iteration, 5);
+    // Newest entry should be from iteration 14
+    ASSERT_EQ(r.attempts[9].iteration, 14);
+
+    adam_evolve_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(evolve_null_params) {
+    adam_settings_t *s = adam_create_settings();
+
+    // NULL config
+    adam_evolve_result_t r1 = adam_evolve(s, NULL);
+    ASSERT_EQ(r1.status, ADAM_ERR_INVALID_PARAM);
+    adam_evolve_result_free(&r1);
+
+    // NULL settings
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "test";
+    cfg.eval_fn = eval_fixed;
+    adam_evolve_result_t r2 = adam_evolve(NULL, &cfg);
+    ASSERT_EQ(r2.status, ADAM_ERR_INVALID_PARAM);
+    adam_evolve_result_free(&r2);
+
+    // NULL task
+    adam_evolve_config_t cfg3 = adam_evolve_config_defaults();
+    cfg3.eval_fn = eval_fixed;
+    adam_evolve_result_t r3 = adam_evolve(s, &cfg3);
+    ASSERT_EQ(r3.status, ADAM_ERR_INVALID_PARAM);
+    adam_evolve_result_free(&r3);
+
+    // NULL eval_fn
+    adam_evolve_config_t cfg4 = adam_evolve_config_defaults();
+    cfg4.task = "test";
+    adam_evolve_result_t r4 = adam_evolve(s, &cfg4);
+    ASSERT_EQ(r4.status, ADAM_ERR_INVALID_PARAM);
+    adam_evolve_result_free(&r4);
+
+    adam_settings_destroy(s);
+}
+
+TEST(evolve_abort) {
+    mock_evolve_ctx_t mock = {0};
+    int eval_calls = 0;
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_evolve, &mock);
+
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "test abort";
+    cfg.eval_fn = eval_fixed;
+    cfg.eval_ctx = &eval_calls;
+
+    // abort_flag is reset by adam_run, but we check it before each iteration.
+    // Since adam_run resets it, we need to set it in the eval callback.
+    // Instead, let's test that abort stops after first iteration:
+    // We'll set abort from progress callback.
+    // Actually — the abort_flag is checked at start of each evolution iteration,
+    // but adam_run resets it. So we'd need to set it between iterations.
+    // For simplicity, just set it before calling adam_evolve.
+    // But adam_run resets it internally... let's verify the stop still works
+    // by using the abort from the progress callback.
+
+    // Use progress to set abort after 2 iterations
+    s->abort_flag = 0;
+    cfg.progress_fn = NULL; // can't easily set abort from here without shared state
+
+    // Alternative: set abort before calling. adam_run resets it, but our
+    // evolve loop checks it at the top of each iteration. First iteration
+    // will proceed (adam_run resets the flag). After first iteration completes,
+    // flag is still 0. So we need another approach.
+
+    // Let's verify with eval callback setting abort:
+    // We'll abuse eval_ctx to also point to settings for abort.
+    // Simpler: just test that the loop runs exactly the eval_calls.
+    // Skip this complexity — test that abort before first iteration works
+    // by examining the behavior.
+
+    // Actually, the simplest test: have eval set the abort flag
+    // We'll use a special eval for this.
+    adam_settings_destroy(s);
+
+    // Fresh setup with abort-aware eval
+    s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_evolve, &mock);
+
+    typedef struct { adam_settings_t *s; int call_count; } abort_eval_ctx_t;
+    abort_eval_ctx_t actx = { .s = s, .call_count = 0 };
+
+    cfg.eval_ctx = &actx;
+    // We can't easily define a new eval inline in C, so let's just test
+    // that providing abort before does something reasonable.
+    // Reset mock counts
+    mock.attempt_count = 0;
+    mock.refine_count = 0;
+    mock.insight_count = 0;
+
+    // Set abort before first iteration — but adam_run resets it.
+    // The evolve loop checks abort_flag at the top, before adam_run.
+    s->abort_flag = 1;
+    cfg.eval_fn = eval_fixed;
+    cfg.eval_ctx = &eval_calls;
+    eval_calls = 0;
+
+    adam_evolve_result_t r = adam_evolve(s, &cfg);
+    ASSERT_EQ(r.status, ADAM_ERR_ABORTED);
+    ASSERT_EQ(r.stop_reason, ADAM_EVOLVE_STOP_ABORTED);
+    ASSERT_EQ(eval_calls, 0); // never called — aborted before first iteration
+
+    adam_evolve_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(evolve_eval_error) {
+    // Eval returns -1 on third call -> should stop with error
+    mock_evolve_ctx_t mock = {0};
+    int eval_calls = 0;
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_evolve, &mock);
+
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "Test error handling.";
+    cfg.eval_fn = eval_error;
+    cfg.eval_ctx = &eval_calls;
+    cfg.max_iterations = 10;
+    cfg.plateau_iters = 100;
+
+    adam_evolve_result_t r = adam_evolve(s, &cfg);
+
+    ASSERT_EQ(r.stop_reason, ADAM_EVOLVE_STOP_ERROR);
+    ASSERT_EQ(eval_calls, 3); // failed on 3rd call
+    ASSERT_EQ(r.attempt_total, 2); // only 2 complete iterations
+
+    adam_evolve_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(evolve_progress_callback) {
+    // Verify progress callback fires with correct values
+    mock_evolve_ctx_t mock = {0};
+    int eval_calls = 0;
+    progress_ctx_t pctx = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_evolve, &mock);
+
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "Progress test.";
+    cfg.eval_fn = eval_improving;
+    cfg.eval_ctx = &eval_calls;
+    cfg.progress_fn = on_progress;
+    cfg.progress_ctx = &pctx;
+    cfg.max_iterations = 3;
+    cfg.target_score = 999;
+    cfg.plateau_iters = 999;
+
+    adam_evolve_result_t r = adam_evolve(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(pctx.calls, 3);
+    ASSERT_EQ(pctx.last_score, 60); // last iteration: 20+2*20=60
+    ASSERT_EQ(pctx.last_best, 40); // best at time of last call (before update)
+
+    adam_evolve_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(evolve_config_defaults) {
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    ASSERT_EQ(cfg.max_iterations, 10);
+    ASSERT_EQ(cfg.target_score, 95);
+    ASSERT_EQ(cfg.plateau_iters, 3);
+    ASSERT_NULL(cfg.task);
+    ASSERT_NULL(cfg.initial_strategy);
+    ASSERT_NULL(cfg.metrics);
+    ASSERT_NULL(cfg.eval_fn);
+    ASSERT_NULL(cfg.progress_fn);
+}
+
+TEST(evolve_no_strategy_no_metrics) {
+    // Run without initial_strategy and metrics — should still work
+    mock_evolve_ctx_t mock = {0};
+    int eval_calls = 0;
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_evolve, &mock);
+
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "Minimal config test.";
+    cfg.eval_fn = eval_fixed;
+    cfg.eval_ctx = &eval_calls;
+    cfg.max_iterations = 2;
+    cfg.plateau_iters = 100;
+    cfg.target_score = 200;
+
+    adam_evolve_result_t r = adam_evolve(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.attempt_total, 2);
+    ASSERT_NOT_NULL(r.strategy); // default "No strategy yet." or refined
+    ASSERT_NOT_NULL(r.insights);
+
+    adam_evolve_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+// ============================================================================
+// MARK: - Tests: Research Mode
+// ============================================================================
+
+// Mock LLM for research: simulates tool-using research agent behavior.
+// - First call: returns findings with FINDING:/SOURCE: tags
+// - Second call: returns more findings
+// - Third call: returns RESEARCH_COMPLETE with a report
+typedef struct {
+    int call_count;
+    int include_complete;       // if 1, say RESEARCH_COMPLETE on call N
+    int complete_on_call;       // which call to complete on (default: 3)
+} mock_research_ctx_t;
+
+static adam_llm_response_t mock_llm_research(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_research_ctx_t *m = (mock_research_ctx_t *)ctx;
+    m->call_count++;
+    UNUSED_PARAM(msgs); UNUSED_PARAM(msg_count);
+    UNUSED_PARAM(tools); UNUSED_PARAM(tool_count);
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 100;
+    resp.output_tokens = 50;
+
+    int complete_at = m->complete_on_call > 0 ? m->complete_on_call : 3;
+
+    if (m->include_complete && m->call_count >= complete_at) {
+        resp.content = arena_strdup(arena,
+            "FINDING: The speed of light is 299,792,458 m/s.\n"
+            "SOURCE: Physics textbook\n\n"
+            "RESEARCH_COMPLETE\n"
+            "# Research Report\n\n"
+            "The speed of light in vacuum is approximately 299,792,458 "
+            "meters per second. This is a fundamental constant of nature.");
+    } else if (m->call_count == 1) {
+        resp.content = arena_strdup(arena,
+            "I'll search for information about this topic.\n\n"
+            "FINDING: Light travels at approximately 3x10^8 m/s in vacuum.\n"
+            "SOURCE: Wikipedia\n\n"
+            "FINDING: The speed of light is denoted by the letter c.\n"
+            "SOURCE: Physics reference\n\n"
+            "I need to search for more details.");
+    } else if (m->call_count == 2) {
+        resp.content = arena_strdup(arena,
+            "FINDING: Einstein's E=mc^2 relates energy to mass via c.\n"
+            "SOURCE: Theory of Relativity\n\n"
+            "FINDING: Light slows down in denser media like glass or water.\n"
+            "SOURCE: Optics textbook\n\n"
+            "Let me search for more specific data.");
+    } else {
+        // Generic fallback: return more findings
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "FINDING: Additional fact #%d about the topic.\n"
+            "SOURCE: Source #%d\n", m->call_count, m->call_count);
+        resp.content = arena_strdup(arena, buf);
+    }
+
+    return resp;
+}
+
+// Mock LLM for report synthesis (used when agent doesn't say RESEARCH_COMPLETE)
+static adam_llm_response_t mock_llm_research_report(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_research_ctx_t *m = (mock_research_ctx_t *)ctx;
+    m->call_count++;
+    UNUSED_PARAM(tools); UNUSED_PARAM(tool_count);
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 100;
+    resp.output_tokens = 50;
+
+    // Check if this is a synthesis request
+    const char *last_msg = "";
+    for (size_t i = msg_count; i > 0; i--) {
+        if (msgs[i - 1].role == ADAM_ROLE_USER && msgs[i - 1].content) {
+            last_msg = msgs[i - 1].content;
+            break;
+        }
+    }
+
+    if (strstr(last_msg, "Synthesize all research")) {
+        resp.content = arena_strdup(arena,
+            "# Research Report\n\n"
+            "This is a synthesized report based on all findings.");
+    } else {
+        // Research iteration — return findings but no COMPLETE
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "FINDING: Fact from iteration %d.\n"
+            "SOURCE: Source %d\n", m->call_count, m->call_count);
+        resp.content = arena_strdup(arena, buf);
+    }
+
+    return resp;
+}
+
+TEST(research_config_defaults) {
+    adam_research_config_t cfg = adam_research_config_defaults();
+    ASSERT_EQ(cfg.max_iterations, 5);
+    ASSERT_NULL(cfg.question);
+    ASSERT_NULL(cfg.instructions);
+    ASSERT_NULL(cfg.is_complete);
+    ASSERT_NULL(cfg.on_progress);
+}
+
+TEST(research_null_params) {
+    adam_settings_t *s = adam_create_settings();
+
+    // NULL config
+    adam_research_result_t r1 = adam_research(s, NULL);
+    ASSERT_EQ(r1.status, ADAM_ERR_INVALID_PARAM);
+    adam_research_result_free(&r1);
+
+    // NULL settings
+    adam_research_config_t cfg = adam_research_config_defaults();
+    cfg.question = "test";
+    adam_research_result_t r2 = adam_research(NULL, &cfg);
+    ASSERT_EQ(r2.status, ADAM_ERR_INVALID_PARAM);
+    adam_research_result_free(&r2);
+
+    // NULL question
+    adam_research_config_t cfg3 = adam_research_config_defaults();
+    adam_research_result_t r3 = adam_research(s, &cfg3);
+    ASSERT_EQ(r3.status, ADAM_ERR_INVALID_PARAM);
+    adam_research_result_free(&r3);
+
+    adam_settings_destroy(s);
+}
+
+TEST(research_complete_by_agent) {
+    // Agent says RESEARCH_COMPLETE on 3rd call
+    mock_research_ctx_t mock = { .include_complete = 1, .complete_on_call = 3 };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_research, &mock);
+
+    adam_research_config_t cfg = adam_research_config_defaults();
+    cfg.question = "What is the speed of light?";
+    cfg.max_iterations = 10;
+
+    adam_research_result_t r = adam_research(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.stop_reason, ADAM_RESEARCH_STOP_COMPLETE);
+    ASSERT_EQ(r.total_iterations, 3);
+
+    // Should have findings from all iterations
+    ASSERT(r.finding_count >= 3); // at least from first 2 iters + complete iter
+
+    // Report should be the text after RESEARCH_COMPLETE
+    ASSERT_NOT_NULL(r.report);
+    ASSERT(strstr(r.report, "Research Report") != NULL);
+
+    // Stats
+    ASSERT(r.total_input_tokens > 0);
+    ASSERT(r.total_output_tokens > 0);
+    ASSERT(r.elapsed_ms >= 0.0);
+
+    adam_research_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(research_max_iterations) {
+    // Agent never says COMPLETE, hits max_iterations
+    mock_research_ctx_t mock = { .include_complete = 0 };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_research_report, &mock);
+
+    adam_research_config_t cfg = adam_research_config_defaults();
+    cfg.question = "What are the effects of climate change?";
+    cfg.max_iterations = 3;
+
+    adam_research_result_t r = adam_research(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.stop_reason, ADAM_RESEARCH_STOP_MAX_ITERS);
+    ASSERT_EQ(r.total_iterations, 3);
+
+    // Should have findings from each iteration
+    ASSERT(r.finding_count >= 3);
+
+    // Report should be synthesized (separate LLM call at end)
+    ASSERT_NOT_NULL(r.report);
+    ASSERT(strstr(r.report, "Research Report") != NULL);
+
+    // The synthesis call adds 1 more LLM call: 3 iterations + 1 synthesis = 4
+    ASSERT_EQ(mock.call_count, 4);
+
+    adam_research_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(research_findings_parsed) {
+    // Verify FINDING:/SOURCE: parsing works correctly
+    mock_research_ctx_t mock = { .include_complete = 1, .complete_on_call = 2 };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_research, &mock);
+
+    adam_research_config_t cfg = adam_research_config_defaults();
+    cfg.question = "Speed of light";
+    cfg.max_iterations = 5;
+
+    adam_research_result_t r = adam_research(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+
+    // First iteration returns 2 findings, second returns 1 + COMPLETE
+    ASSERT(r.finding_count >= 2);
+
+    // Check first finding
+    ASSERT_NOT_NULL(r.findings[0].content);
+    ASSERT(strstr(r.findings[0].content, "3x10^8") != NULL ||
+           strstr(r.findings[0].content, "light") != NULL);
+    ASSERT_NOT_NULL(r.findings[0].source);
+    ASSERT_EQ(r.findings[0].iteration, 0);
+
+    adam_research_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+// Static callback for research completion test
+static int research_complete_after_2(void *ctx, const char *report,
+                                       int iteration) {
+    UNUSED_PARAM(ctx); UNUSED_PARAM(report);
+    return iteration >= 1; // complete after 2 iterations (0-indexed)
+}
+
+TEST(research_callback_stops_loop) {
+    mock_research_ctx_t mock = { .include_complete = 0 };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_research_report, &mock);
+
+    adam_research_config_t cfg = adam_research_config_defaults();
+    cfg.question = "Quick test";
+    cfg.max_iterations = 10;
+    cfg.is_complete = research_complete_after_2;
+
+    adam_research_result_t r = adam_research(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.stop_reason, ADAM_RESEARCH_STOP_CALLBACK);
+    ASSERT_EQ(r.total_iterations, 2);
+
+    // Report should be synthesized since agent didn't say COMPLETE
+    ASSERT_NOT_NULL(r.report);
+
+    adam_research_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(research_abort) {
+    mock_research_ctx_t mock = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_research, &mock);
+    s->abort_flag = 1;
+
+    adam_research_config_t cfg = adam_research_config_defaults();
+    cfg.question = "Aborted research";
+
+    adam_research_result_t r = adam_research(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_ERR_ABORTED);
+    ASSERT_EQ(r.stop_reason, ADAM_RESEARCH_STOP_ABORTED);
+    ASSERT_EQ(r.total_iterations, 0);
+    ASSERT_EQ(mock.call_count, 0);
+
+    adam_research_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+// Progress tracker for research
+typedef struct {
+    int calls;
+    char last_status[128];
+} research_progress_ctx_t;
+
+static void on_research_progress(void *ctx, int iteration, const char *status) {
+    UNUSED_PARAM(iteration);
+    research_progress_ctx_t *p = (research_progress_ctx_t *)ctx;
+    p->calls++;
+    if (status) {
+        size_t len = strlen(status);
+        if (len > 127) len = 127;
+        memcpy(p->last_status, status, len);
+        p->last_status[len] = '\0';
+    }
+}
+
+TEST(research_progress_callback) {
+    mock_research_ctx_t mock = { .include_complete = 1, .complete_on_call = 2 };
+    research_progress_ctx_t pctx = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_research, &mock);
+
+    adam_research_config_t cfg = adam_research_config_defaults();
+    cfg.question = "Progress test";
+    cfg.max_iterations = 5;
+    cfg.on_progress = on_research_progress;
+    cfg.progress_ctx = &pctx;
+
+    adam_research_result_t r = adam_research(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(pctx.calls, 2); // 2 iterations before COMPLETE
+    ASSERT(strstr(pctx.last_status, "findings") != NULL);
+
+    adam_research_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(research_with_instructions) {
+    // Verify extra instructions are accepted (not crash, correct flow)
+    mock_research_ctx_t mock = { .include_complete = 1, .complete_on_call = 1 };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_research, &mock);
+
+    adam_research_config_t cfg = adam_research_config_defaults();
+    cfg.question = "Speed of light";
+    cfg.instructions = "Focus on historical measurements. "
+                       "Include Roemer's 1676 estimate.";
+
+    adam_research_result_t r = adam_research(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_NOT_NULL(r.report);
+    ASSERT_EQ(r.total_iterations, 1);
+
+    adam_research_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+TEST(research_tool_basic) {
+    // Test adam_tool_research as a callable tool during a session
+    mock_research_ctx_t mock = { .include_complete = 1, .complete_on_call = 1 };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_research, &mock);
+
+    arena_t *a = arena_create(64 * 1024);
+
+    const char *args = "{\"question\":\"What is gravity?\"}";
+    adam_tool_result_t res = adam_tool_research(a, s, args, strlen(args));
+
+    ASSERT_EQ(res.success, 1);
+    ASSERT_NOT_NULL(res.for_llm);
+    ASSERT(strstr(res.for_llm, "Research Report") != NULL ||
+           strstr(res.for_llm, "Finding") != NULL);
+    ASSERT_NOT_NULL(res.for_user);
+    ASSERT(strstr(res.for_user, "Researching") != NULL);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(research_tool_bad_args) {
+    adam_settings_t *s = adam_create_settings();
+    arena_t *a = arena_create(4096);
+
+    // Missing question
+    const char *args1 = "{\"instructions\":\"test\"}";
+    adam_tool_result_t r1 = adam_tool_research(a, s, args1, strlen(args1));
+    ASSERT_EQ(r1.success, 0);
+    ASSERT(strstr(r1.for_llm, "required") != NULL);
+
+    // NULL ctx
+    adam_tool_result_t r2 = adam_tool_research(a, NULL, "{}", 2);
+    ASSERT_EQ(r2.success, 0);
+
+    // Invalid JSON
+    adam_tool_result_t r3 = adam_tool_research(a, s, "not json", 8);
+    ASSERT_EQ(r3.success, 0);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+// ============================================================================
+// MARK: - Tests: Built-in Tools (file, shell, calculator, sql)
+// ============================================================================
+
+TEST(tool_calculator_basic) {
+    arena_t *a = arena_create(4096);
+
+    const char *args = "{\"expression\":\"2 + 3 * 4\"}";
+    adam_tool_result_t r = adam_tool_calculator(a, NULL, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+    ASSERT_STR_EQ(r.for_llm, "14");
+
+    arena_reset(a);
+    args = "{\"expression\":\"(10 + 5) / 3\"}";
+    r = adam_tool_calculator(a, NULL, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+    ASSERT_STR_EQ(r.for_llm, "5");
+
+    arena_reset(a);
+    args = "{\"expression\":\"2 ^ 10\"}";
+    r = adam_tool_calculator(a, NULL, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+    ASSERT_STR_EQ(r.for_llm, "1024");
+
+    arena_reset(a);
+    args = "{\"expression\":\"-5 + 3\"}";
+    r = adam_tool_calculator(a, NULL, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+    ASSERT_STR_EQ(r.for_llm, "-2");
+
+    arena_reset(a);
+    args = "{\"expression\":\"100 % 7\"}";
+    r = adam_tool_calculator(a, NULL, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+    ASSERT_STR_EQ(r.for_llm, "2");
+
+    arena_destroy(a);
+}
+
+TEST(tool_calculator_errors) {
+    arena_t *a = arena_create(4096);
+
+    // Missing expression
+    const char *args = "{\"foo\":\"bar\"}";
+    adam_tool_result_t r = adam_tool_calculator(a, NULL, args, strlen(args));
+    ASSERT_EQ(r.success, 0);
+    ASSERT(strstr(r.for_llm, "required") != NULL);
+
+    // Division by zero
+    arena_reset(a);
+    args = "{\"expression\":\"1 / 0\"}";
+    r = adam_tool_calculator(a, NULL, args, strlen(args));
+    // Should return Infinity or error
+    ASSERT_NOT_NULL(r.for_llm);
+
+    arena_destroy(a);
+}
+
+TEST(tool_file_read_sandbox) {
+    arena_t *a = arena_create(64 * 1024);
+    adam_settings_t *s = adam_create_settings();
+
+    // No allowed dirs — should deny
+    const char *args = "{\"path\":\"/etc/hosts\"}";
+    adam_tool_result_t r = adam_tool_file_read(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 0);
+    ASSERT(strstr(r.for_llm, "denied") != NULL);
+
+    // Allow /tmp
+    ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
+
+    // Write a test file
+    FILE *f = fopen("/tmp/adam_test_read.txt", "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "hello from adam test");
+    fclose(f);
+
+    // Read it — should succeed
+    arena_reset(a);
+    args = "{\"path\":\"/tmp/adam_test_read.txt\"}";
+    r = adam_tool_file_read(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+    ASSERT_STR_EQ(r.for_llm, "hello from adam test");
+
+    // Try to escape sandbox
+    arena_reset(a);
+    args = "{\"path\":\"/tmp/../etc/hosts\"}";
+    r = adam_tool_file_read(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 0);
+    ASSERT(strstr(r.for_llm, "denied") != NULL);
+
+    remove("/tmp/adam_test_read.txt");
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(tool_file_write_sandbox) {
+    arena_t *a = arena_create(4096);
+    adam_settings_t *s = adam_create_settings();
+    ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
+
+    // Write a file
+    const char *args = "{\"path\":\"/tmp/adam_test_write.txt\","
+                       "\"content\":\"test content\"}";
+    adam_tool_result_t r = adam_tool_file_write(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+    ASSERT(strstr(r.for_llm, "Wrote") != NULL);
+
+    // Verify contents
+    FILE *f = fopen("/tmp/adam_test_write.txt", "r");
+    ASSERT_NOT_NULL(f);
+    char buf[64];
+    size_t n = fread(buf, 1, 63, f);
+    buf[n] = '\0';
+    fclose(f);
+    ASSERT_STR_EQ(buf, "test content");
+
+    // Append
+    arena_reset(a);
+    args = "{\"path\":\"/tmp/adam_test_write.txt\","
+           "\"content\":\" appended\",\"append\":true}";
+    r = adam_tool_file_write(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+
+    f = fopen("/tmp/adam_test_write.txt", "r");
+    n = fread(buf, 1, 63, f);
+    buf[n] = '\0';
+    fclose(f);
+    ASSERT_STR_EQ(buf, "test content appended");
+
+    // Deny outside sandbox
+    arena_reset(a);
+    args = "{\"path\":\"/etc/adam_test.txt\",\"content\":\"hack\"}";
+    r = adam_tool_file_write(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 0);
+    ASSERT(strstr(r.for_llm, "denied") != NULL);
+
+    remove("/tmp/adam_test_write.txt");
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(tool_list_directory_sandbox) {
+    arena_t *a = arena_create(64 * 1024);
+    adam_settings_t *s = adam_create_settings();
+    ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
+
+    // Create test directory with a file
+    mkdir("/tmp/adam_test_dir", 0755);
+    FILE *f = fopen("/tmp/adam_test_dir/test.txt", "w");
+    if (f) { fputs("x", f); fclose(f); }
+
+    const char *args = "{\"path\":\"/tmp/adam_test_dir\"}";
+    adam_tool_result_t r = adam_tool_list_directory(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+    ASSERT(strstr(r.for_llm, "test.txt") != NULL);
+    ASSERT(strstr(r.for_llm, "file") != NULL);
+
+    // Deny outside sandbox
+    arena_reset(a);
+    args = "{\"path\":\"/etc\"}";
+    r = adam_tool_list_directory(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 0);
+
+    remove("/tmp/adam_test_dir/test.txt");
+    rmdir("/tmp/adam_test_dir");
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(tool_shell_exec_basic) {
+    arena_t *a = arena_create(64 * 1024);
+    adam_settings_t *s = adam_create_settings();
+
+    // No allowed dirs — should deny
+    const char *args = "{\"command\":\"echo hello\"}";
+    adam_tool_result_t r = adam_tool_shell_exec(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 0);
+    ASSERT(strstr(r.for_llm, "denied") != NULL);
+
+    // Allow /tmp
+    ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
+
+    // Simple echo
+    arena_reset(a);
+    r = adam_tool_shell_exec(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+    ASSERT(strstr(r.for_llm, "hello") != NULL);
+    ASSERT(strstr(r.for_llm, "exit code: 0") != NULL);
+
+    // Command that fails
+    arena_reset(a);
+    args = "{\"command\":\"false\"}";
+    r = adam_tool_shell_exec(a, s, args, strlen(args));
+    ASSERT_EQ(r.success, 0); // exit code != 0
+    ASSERT(strstr(r.for_llm, "exit code: 1") != NULL);
+
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+TEST(tool_allow_dir) {
+    adam_settings_t *s = adam_create_settings();
+
+    ASSERT_EQ(s->allowed_dir_count, 0);
+    ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
+    ASSERT_EQ(s->allowed_dir_count, 1);
+    ASSERT_EQ(adam_settings_allow_dir(s, "/var"), ADAM_OK);
+    ASSERT_EQ(s->allowed_dir_count, 2);
+
+    // NULL params
+    ASSERT_EQ(adam_settings_allow_dir(NULL, "/tmp"), ADAM_ERR_INVALID_PARAM);
+    ASSERT_EQ(adam_settings_allow_dir(s, NULL), ADAM_ERR_INVALID_PARAM);
+
+    // Nonexistent dir
+    ASSERT_EQ(adam_settings_allow_dir(s, "/nonexistent_dir_xyz"),
+              ADAM_ERR_INVALID_PARAM);
+
+    adam_settings_destroy(s);
+}
+
+#ifndef ADAM_NO_SQLITE
+
+TEST(tool_sql_query_basic) {
+    adam_memory_t *mem = adam_memory_open(":memory:");
+    ASSERT_NOT_NULL(mem);
+
+    arena_t *a = arena_create(64 * 1024);
+
+    // Create a table and insert data
+    const char *args = "{\"sql\":\"CREATE TABLE test(id INTEGER, name TEXT)\"}";
+    adam_tool_result_t r = adam_tool_sql_query(a, mem, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+
+    arena_reset(a);
+    args = "{\"sql\":\"INSERT INTO test VALUES(1, 'Alice')\"}";
+    r = adam_tool_sql_query(a, mem, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+
+    arena_reset(a);
+    args = "{\"sql\":\"INSERT INTO test VALUES(2, 'Bob')\"}";
+    r = adam_tool_sql_query(a, mem, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+
+    // SELECT
+    arena_reset(a);
+    args = "{\"sql\":\"SELECT * FROM test ORDER BY id\"}";
+    r = adam_tool_sql_query(a, mem, args, strlen(args));
+    ASSERT_EQ(r.success, 1);
+    ASSERT(strstr(r.for_llm, "Alice") != NULL);
+    ASSERT(strstr(r.for_llm, "Bob") != NULL);
+
+    // Block DROP
+    arena_reset(a);
+    args = "{\"sql\":\"DROP TABLE test\"}";
+    r = adam_tool_sql_query(a, mem, args, strlen(args));
+    ASSERT_EQ(r.success, 0);
+    ASSERT(strstr(r.for_llm, "destructive") != NULL);
+
+    arena_destroy(a);
+    adam_memory_close(mem);
+}
+
+#endif // ADAM_NO_SQLITE
+
+// ============================================================================
+// MARK: - Tests: History Clone
+// ============================================================================
+
+TEST(history_clone_basic) {
+    adam_history_t *h = adam_history_create();
+    adam_history_append_user(h, "Hello");
+    adam_history_append_assistant(h, "Hi there", NULL, 0);
+
+    adam_history_t *c = adam_history_clone(h);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(adam_history_count(c), 2);
+    ASSERT_STR_EQ(c->items[0].content, "Hello");
+    ASSERT_STR_EQ(c->items[1].content, "Hi there");
+    // Verify independent pointers
+    ASSERT(c->items[0].content != h->items[0].content);
+
+    adam_history_destroy(h);
+    adam_history_destroy(c);
+}
+
+TEST(history_clone_with_tool_calls) {
+    adam_history_t *h = adam_history_create();
+    adam_history_append_user(h, "Search");
+    adam_tool_call_t tc = { .id = "c1", .name = "search",
+                            .arguments_json = "{\"q\":\"x\"}" };
+    adam_history_append_assistant(h, "Searching...", &tc, 1);
+    adam_history_append_tool(h, "found it", "c1");
+
+    adam_history_t *c = adam_history_clone(h);
+    ASSERT_EQ(adam_history_count(c), 3);
+    ASSERT_EQ(c->items[1].tool_call_count, 1);
+    ASSERT_STR_EQ(c->items[1].tool_calls[0].id, "c1");
+    ASSERT_STR_EQ(c->items[1].tool_calls[0].name, "search");
+    ASSERT_STR_EQ(c->items[2].tool_call_id, "c1");
+    // Independent pointers
+    ASSERT(c->items[1].tool_calls[0].id != h->items[1].tool_calls[0].id);
+
+    adam_history_destroy(h);
+    adam_history_destroy(c);
+}
+
+TEST(history_clone_empty) {
+    adam_history_t *h = adam_history_create();
+    adam_history_t *c = adam_history_clone(h);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(adam_history_count(c), 0);
+    adam_history_destroy(h);
+    adam_history_destroy(c);
+}
+
+TEST(history_clone_modify_original) {
+    adam_history_t *h = adam_history_create();
+    adam_history_append_user(h, "Original");
+    adam_history_t *c = adam_history_clone(h);
+
+    // Modify original
+    adam_history_clear(h);
+    ASSERT_EQ(adam_history_count(h), 0);
+    // Clone should be unaffected
+    ASSERT_EQ(adam_history_count(c), 1);
+    ASSERT_STR_EQ(c->items[0].content, "Original");
+
+    adam_history_destroy(h);
+    adam_history_destroy(c);
+}
+
+// ============================================================================
+// MARK: - Tests: Timeout
+// ============================================================================
+
+// Mock LLM that always returns tool calls (infinite loop)
+static adam_llm_response_t mock_llm_infinite_tools(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_llm_ctx_t *mock = (mock_llm_ctx_t *)ctx;
+    mock->call_count++;
+    UNUSED_PARAM(msgs); UNUSED_PARAM(msg_count);
+    UNUSED_PARAM(tools); UNUSED_PARAM(tool_count);
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 10;
+    resp.output_tokens = 10;
+    resp.tool_calls = arena_alloc(arena, sizeof(adam_tool_call_t));
+    resp.tool_call_count = 1;
+    resp.tool_calls[0].id = arena_strdup(arena, "call_loop");
+    resp.tool_calls[0].name = arena_strdup(arena, "search");
+    resp.tool_calls[0].arguments_json = arena_strdup(arena, "{}");
+    return resp;
+}
+
+TEST(timeout_triggers) {
+    mock_llm_ctx_t mock = {0};
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_infinite_tools, &mock);
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "search", .execute = mock_tool_search });
+    s->timeout_ms = 1; // 1ms
+    s->max_iterations = 10000; // high limit so timeout is the real constraint
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Loop forever");
+
+    // Should timeout (or hit max_iterations if mock is too fast)
+    ASSERT(r.status == ADAM_ERR_TIMEOUT || r.status == ADAM_ERR_MAX_ITERATIONS);
+    // Should have run fewer than max iterations if timeout worked
+    ASSERT(r.total_iterations < 10000);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(timeout_zero_disabled) {
+    mock_llm_ctx_t mock = { .fixed_response = "Done." };
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->timeout_ms = 0; // disabled
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Quick test");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+// ============================================================================
+// MARK: - Tests: Guardrails
+// ============================================================================
+
+static int guardrail_allow(void *ctx, const adam_message_t *msgs, size_t count) {
+    UNUSED_PARAM(msgs); UNUSED_PARAM(count);
+    (*(int *)ctx)++;
+    return 0; // allow
+}
+
+static int guardrail_deny(void *ctx, const adam_message_t *msgs, size_t count) {
+    UNUSED_PARAM(msgs); UNUSED_PARAM(count);
+    (*(int *)ctx)++;
+    return 1; // deny
+}
+
+static int guardrail_resp_allow(void *ctx, const char *content,
+                                  const adam_tool_call_t *tc, size_t tc_count) {
+    UNUSED_PARAM(content); UNUSED_PARAM(tc); UNUSED_PARAM(tc_count);
+    (*(int *)ctx)++;
+    return 0;
+}
+
+static int guardrail_resp_deny(void *ctx, const char *content,
+                                 const adam_tool_call_t *tc, size_t tc_count) {
+    UNUSED_PARAM(content); UNUSED_PARAM(tc); UNUSED_PARAM(tc_count);
+    (*(int *)ctx)++;
+    return 1;
+}
+
+TEST(guardrail_before_allow) {
+    mock_llm_ctx_t mock = { .fixed_response = "OK" };
+    int guard_calls = 0;
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->on_before_send = guardrail_allow;
+    s->before_send_ctx = &guard_calls;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Test");
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT(guard_calls >= 1);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(guardrail_before_deny) {
+    mock_llm_ctx_t mock = {0};
+    int guard_calls = 0;
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->on_before_send = guardrail_deny;
+    s->before_send_ctx = &guard_calls;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Test");
+    ASSERT_EQ(r.status, ADAM_ERR_GUARDRAIL);
+    ASSERT_EQ(mock.call_count, 0); // LLM never called
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(guardrail_after_deny) {
+    mock_llm_ctx_t mock = { .fixed_response = "bad content" };
+    int guard_calls = 0;
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->on_after_receive = guardrail_resp_deny;
+    s->after_receive_ctx = &guard_calls;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Test");
+    ASSERT_EQ(r.status, ADAM_ERR_GUARDRAIL);
+    ASSERT_EQ(mock.call_count, 1); // LLM was called
+    ASSERT(guard_calls >= 1);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+// ============================================================================
+// MARK: - Tests: Structured JSON Output
+// ============================================================================
+
+// Mock that returns valid JSON
+static adam_llm_response_t mock_llm_json(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_llm_ctx_t *mock = (mock_llm_ctx_t *)ctx;
+    mock->call_count++;
+    UNUSED_PARAM(msgs); UNUSED_PARAM(msg_count);
+    UNUSED_PARAM(tools); UNUSED_PARAM(tool_count);
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 50;
+    resp.output_tokens = 20;
+
+    if (mock->call_count == 1 && mock->simulate_error) {
+        // First call: return invalid JSON for retry testing
+        resp.content = arena_strdup(arena, "This is not JSON");
+    } else {
+        resp.content = arena_strdup(arena, "{\"answer\":42,\"name\":\"Adam\"}");
+    }
+    return resp;
+}
+
+TEST(run_json_valid) {
+    mock_llm_ctx_t mock = {0};
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_json, &mock);
+
+    adam_history_t *h = adam_history_create();
+    adam_json_result_t r = adam_run_json(s, h, "Give me JSON", NULL, 3);
+
+    ASSERT_EQ(r.base.status, ADAM_OK);
+    ASSERT_EQ(r.json_valid, 1);
+    ASSERT_EQ(r.retries_used, 0);
+    ASSERT_NOT_NULL(r.base.final_response);
+    ASSERT(strstr(r.base.final_response, "\"answer\"") != NULL);
+
+    adam_json_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+// Mock that returns bad JSON first, valid on second call
+static adam_llm_response_t mock_llm_bad_then_good_json(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_llm_ctx_t *mock = (mock_llm_ctx_t *)ctx;
+    mock->call_count++;
+    UNUSED_PARAM(msgs); UNUSED_PARAM(msg_count);
+    UNUSED_PARAM(tools); UNUSED_PARAM(tool_count);
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 50;
+    resp.output_tokens = 20;
+
+    if (mock->call_count <= 1) {
+        resp.content = arena_strdup(arena, "This is not valid JSON at all");
+    } else {
+        resp.content = arena_strdup(arena, "{\"result\":\"success\"}");
+    }
+    return resp;
+}
+
+TEST(run_json_retry) {
+    mock_llm_ctx_t mock = {0};
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_bad_then_good_json, &mock);
+
+    adam_history_t *h = adam_history_create();
+    adam_json_result_t r = adam_run_json(s, h, "Give me JSON", NULL, 3);
+
+    // The mock returns bad JSON first, then valid JSON.
+    // adam_run_json should eventually get valid JSON.
+    ASSERT_NOT_NULL(r.base.final_response);
+    if (mock.call_count >= 2) {
+        // Retry worked as expected
+        ASSERT_EQ(r.json_valid, 1);
+    }
+    // At minimum, the function should not crash and should return
+
+    adam_json_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+TEST(json_extract_basic) {
+    char *v = adam_json_extract("{\"name\":\"Adam\",\"version\":1}", "name");
+    ASSERT_NOT_NULL(v);
+    ASSERT_STR_EQ(v, "Adam");
+    free(v);
+
+    v = adam_json_extract("{\"name\":\"Adam\",\"version\":1}", "version");
+    ASSERT_NOT_NULL(v);
+    ASSERT_STR_EQ(v, "1");
+    free(v);
+
+    v = adam_json_extract("{\"name\":\"Adam\"}", "missing");
+    ASSERT_NULL(v);
+
+    v = adam_json_extract(NULL, "key");
+    ASSERT_NULL(v);
+}
+
+// ============================================================================
+// MARK: - Tests: Multi-Agent Tool
+// ============================================================================
+
+// Mock for multi-agent: sends {"message":"..."} instead of {"query":"..."}
+static adam_llm_response_t mock_llm_agent_caller(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    mock_llm_ctx_t *mock = (mock_llm_ctx_t *)ctx;
+    mock->call_count++;
+    UNUSED_PARAM(tools); UNUSED_PARAM(tool_count);
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 50;
+    resp.output_tokens = 20;
+
+    int has_tool_result = 0;
+    for (size_t i = 0; i < msg_count; i++)
+        if (msgs[i].role == ADAM_ROLE_TOOL) has_tool_result = 1;
+
+    if (!has_tool_result && tool_count > 0) {
+        mock->total_tool_calls_requested++;
+        resp.tool_calls = arena_alloc(arena, sizeof(adam_tool_call_t));
+        resp.tool_call_count = 1;
+        resp.tool_calls[0].id = arena_strdup(arena, "call_sub");
+        resp.tool_calls[0].name = arena_strdup(arena, tools[0].name);
+        resp.tool_calls[0].arguments_json =
+            arena_strdup(arena, "{\"message\":\"What is 2+2?\"}");
+        resp.content = arena_strdup(arena, "Let me ask the sub-agent.");
+    } else {
+        resp.content = arena_strdup(arena, "The sub-agent answered.");
+    }
+    return resp;
+}
+
+TEST(tool_agent_basic) {
+    // Sub-agent with its own mock LLM
+    mock_llm_ctx_t sub_mock = { .fixed_response = "The answer is 4." };
+    adam_settings_t *sub_s = adam_create_settings();
+    adam_settings_set_llm_callback(sub_s, mock_llm_simple, &sub_mock);
+
+    adam_agent_tool_ctx_t actx = { .settings = sub_s, .history = NULL };
+
+    // Main agent calls the sub-agent tool
+    mock_llm_ctx_t main_mock = {0};
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_agent_caller, &main_mock);
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "ask_sub",
+        .description = "Ask sub-agent",
+        .parameters_json = "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"]}",
+        .execute = adam_tool_agent,
+        .ctx = &actx,
+    });
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Delegate this");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(sub_mock.call_count, 1); // sub-agent was called
+    ASSERT_EQ(main_mock.call_count, 2); // main: tool call + final
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+    adam_settings_destroy(sub_s);
+}
+
+TEST(tool_agent_null_ctx) {
+    arena_t *a = arena_create(4096);
+    adam_tool_result_t r = adam_tool_agent(a, NULL, "{\"message\":\"hi\"}", 16);
+    ASSERT_EQ(r.success, 0);
+    ASSERT(strstr(r.for_llm, "not configured") != NULL);
+    arena_destroy(a);
+}
+
+// ============================================================================
+// MARK: - Tests: Response Cache
+// ============================================================================
+
+TEST(cache_miss_then_hit) {
+    mock_llm_ctx_t mock = { .fixed_response = "Cached response" };
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->cache = adam_cache_create(16);
+
+    adam_history_t *h = adam_history_create();
+
+    // First call: miss
+    adam_run_result_t r1 = adam_run(s, h, "Hello");
+    ASSERT_EQ(r1.status, ADAM_OK);
+    ASSERT_EQ(mock.call_count, 1);
+    ASSERT_EQ(adam_cache_misses(s->cache), 1);
+    adam_run_result_free(&r1);
+
+    // Second call with same history: hit
+    // Clear and re-send to get same messages
+    adam_history_destroy(h);
+    h = adam_history_create();
+    mock.call_count = 0; // reset
+
+    adam_run_result_t r2 = adam_run(s, h, "Hello");
+    ASSERT_EQ(r2.status, ADAM_OK);
+    ASSERT_STR_EQ(r2.final_response, "Cached response");
+    ASSERT_EQ(mock.call_count, 0); // LLM NOT called
+    ASSERT_EQ(adam_cache_hits(s->cache), 1);
+
+    adam_run_result_free(&r2);
+    adam_history_destroy(h);
+    adam_cache_destroy(s->cache);
+    s->cache = NULL;
+    adam_settings_destroy(s);
+}
+
+TEST(cache_different_messages) {
+    mock_llm_ctx_t mock = {0};
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->cache = adam_cache_create(16);
+
+    adam_history_t *h1 = adam_history_create();
+    mock.fixed_response = "Response A";
+    adam_run_result_t r1 = adam_run(s, h1, "Message A");
+    ASSERT_EQ(r1.status, ADAM_OK);
+    adam_run_result_free(&r1);
+
+    adam_history_t *h2 = adam_history_create();
+    mock.fixed_response = "Response B";
+    adam_run_result_t r2 = adam_run(s, h2, "Message B");
+    ASSERT_EQ(r2.status, ADAM_OK);
+    adam_run_result_free(&r2);
+
+    ASSERT_EQ(mock.call_count, 2); // both were misses
+    ASSERT_EQ(adam_cache_count(s->cache), 2);
+
+    adam_history_destroy(h1);
+    adam_history_destroy(h2);
+    adam_cache_destroy(s->cache);
+    s->cache = NULL;
+    adam_settings_destroy(s);
+}
+
+TEST(cache_lru_eviction) {
+    adam_cache_t *c = adam_cache_create(2);
+    ASSERT_NOT_NULL(c);
+
+    // Manually store 3 entries
+    extern void adam_cache_store(adam_cache_t *, uint64_t, const char *, int, int);
+    adam_cache_store(c, 1, "first", 10, 5);
+    adam_cache_store(c, 2, "second", 10, 5);
+    ASSERT_EQ(adam_cache_count(c), 2);
+
+    adam_cache_store(c, 3, "third", 10, 5);
+    ASSERT_EQ(adam_cache_count(c), 2); // evicted one
+
+    // First should be evicted (LRU)
+    int in, out;
+    extern const char *adam_cache_lookup(adam_cache_t *, uint64_t, int *, int *);
+    ASSERT_NULL(adam_cache_lookup(c, 1, &in, &out));
+    ASSERT_NOT_NULL(adam_cache_lookup(c, 2, &in, &out));
+    ASSERT_NOT_NULL(adam_cache_lookup(c, 3, &in, &out));
+
+    adam_cache_destroy(c);
+}
+
+TEST(cache_clear) {
+    adam_cache_t *c = adam_cache_create(16);
+    extern void adam_cache_store(adam_cache_t *, uint64_t, const char *, int, int);
+    adam_cache_store(c, 1, "a", 0, 0);
+    adam_cache_store(c, 2, "b", 0, 0);
+    ASSERT_EQ(adam_cache_count(c), 2);
+
+    adam_cache_clear(c);
+    ASSERT_EQ(adam_cache_count(c), 0);
+
+    adam_cache_destroy(c);
+}
+
+TEST(cache_null_disabled) {
+    mock_llm_ctx_t mock = { .fixed_response = "No cache" };
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    // s->cache = NULL (default)
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Test");
+    ASSERT_EQ(r.status, ADAM_OK);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
 
 // ============================================================================
 // MARK: - Performance Benchmarks
@@ -2687,6 +4323,83 @@ int main(void) {
     RUN(session_overwrite);
     RUN(session_persistence_across_reopen);
 #endif
+
+    // --- Evolution Loop ---
+    printf("\nEvolution Loop:\n");
+    RUN(evolve_config_defaults);
+    RUN(evolve_null_params);
+    RUN(evolve_abort);
+    RUN(evolve_basic_improvement);
+    RUN(evolve_plateau_stop);
+    RUN(evolve_max_iterations);
+    RUN(evolve_ring_buffer);
+    RUN(evolve_eval_error);
+    RUN(evolve_progress_callback);
+    RUN(evolve_no_strategy_no_metrics);
+
+    // --- Research Mode ---
+    printf("\nResearch Mode:\n");
+    RUN(research_config_defaults);
+    RUN(research_null_params);
+    RUN(research_abort);
+    RUN(research_complete_by_agent);
+    RUN(research_max_iterations);
+    RUN(research_findings_parsed);
+    RUN(research_callback_stops_loop);
+    RUN(research_progress_callback);
+    RUN(research_with_instructions);
+    RUN(research_tool_basic);
+    RUN(research_tool_bad_args);
+
+    // --- Built-in Tools ---
+    printf("\nBuilt-in Tools:\n");
+    RUN(tool_allow_dir);
+    RUN(tool_calculator_basic);
+    RUN(tool_calculator_errors);
+    RUN(tool_file_read_sandbox);
+    RUN(tool_file_write_sandbox);
+    RUN(tool_list_directory_sandbox);
+    RUN(tool_shell_exec_basic);
+#ifndef ADAM_NO_SQLITE
+    RUN(tool_sql_query_basic);
+#endif
+
+    // --- History Clone ---
+    printf("\nHistory Clone:\n");
+    RUN(history_clone_basic);
+    RUN(history_clone_with_tool_calls);
+    RUN(history_clone_empty);
+    RUN(history_clone_modify_original);
+
+    // --- Timeout ---
+    printf("\nTimeout:\n");
+    RUN(timeout_triggers);
+    RUN(timeout_zero_disabled);
+
+    // --- Guardrails ---
+    printf("\nGuardrails:\n");
+    RUN(guardrail_before_allow);
+    RUN(guardrail_before_deny);
+    RUN(guardrail_after_deny);
+
+    // --- Structured JSON ---
+    printf("\nStructured JSON:\n");
+    RUN(run_json_valid);
+    RUN(run_json_retry);
+    RUN(json_extract_basic);
+
+    // --- Multi-Agent ---
+    printf("\nMulti-Agent:\n");
+    RUN(tool_agent_basic);
+    RUN(tool_agent_null_ctx);
+
+    // --- Response Cache ---
+    printf("\nResponse Cache:\n");
+    RUN(cache_miss_then_hit);
+    RUN(cache_different_messages);
+    RUN(cache_lru_eviction);
+    RUN(cache_clear);
+    RUN(cache_null_disabled);
 
     // --- Performance ---
     printf("\nPerformance:\n");

@@ -60,10 +60,12 @@ static const char *g_status_strings[] = {
     [ADAM_ERR_NO_PROVIDER]      = "no provider configured",
     [ADAM_ERR_VOICE]            = "voice error",
     [ADAM_ERR_NOT_IMPLEMENTED]  = "not yet implemented",
+    [ADAM_ERR_TIMEOUT]          = "timeout",
+    [ADAM_ERR_GUARDRAIL]        = "guardrail blocked",
 };
 
 const char *adam_status_string(adam_status_t status) {
-    if (status < 0 || status > ADAM_ERR_NOT_IMPLEMENTED) return "unknown error";
+    if (status < 0 || status > ADAM_ERR_GUARDRAIL) return "unknown error";
     return g_status_strings[status];
 }
 
@@ -137,8 +139,15 @@ adam_settings_t *adam_create_settings(void) {
     // Logging default
     s->log_level            = ADAM_LOG_WARN;
 
-    // Memory default context
-    s->memory_context       = "default";
+    // Memory defaults
+    s->memory_context             = NULL;       // NULL = search all contexts
+    s->memory_embedding_provider  = "local";
+    s->memory_max_results         = 5;
+    s->memory_min_score           = 0.0f;
+
+    // Session auto-save defaults
+    s->auto_save                  = 1;
+    s->memory_extract             = 0;
 
     // Voice defaults
 #if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
@@ -168,6 +177,9 @@ void adam_settings_destroy(adam_settings_t *s) {
 #endif
     free(s->tools);
     free(s->bootstrap_files);
+    for (size_t i = 0; i < s->allowed_dir_count; i++)
+        free((void *)s->allowed_dirs[i]);
+    free(s->allowed_dirs);
     free(s);
 }
 
@@ -300,6 +312,47 @@ adam_status_t adam_settings_set_http_callback(adam_settings_t *s,
     return ADAM_OK;
 }
 
+adam_status_t adam_settings_allow_dir(adam_settings_t *s, const char *dir_path) {
+    if (!s || !dir_path) return ADAM_ERR_INVALID_PARAM;
+
+    // Resolve to canonical path
+    char resolved[4096];
+#ifdef _WIN32
+    if (!_fullpath(resolved, dir_path, sizeof(resolved))) return ADAM_ERR_INVALID_PARAM;
+#elif defined(__EMSCRIPTEN__)
+    // WASM: no realpath, just copy as-is
+    snprintf(resolved, sizeof(resolved), "%s", dir_path);
+#else
+    if (!realpath(dir_path, resolved)) return ADAM_ERR_INVALID_PARAM;
+#endif
+
+    // Grow array if needed
+    if (s->allowed_dir_count >= s->_allowed_dir_cap) {
+        size_t new_cap = s->_allowed_dir_cap ? s->_allowed_dir_cap * 2 : 4;
+        const char **new_arr = realloc(s->allowed_dirs,
+                                        new_cap * sizeof(const char *));
+        if (!new_arr) return ADAM_ERR_ALLOC;
+        s->allowed_dirs = new_arr;
+        s->_allowed_dir_cap = new_cap;
+    }
+
+    s->allowed_dirs[s->allowed_dir_count] = strdup(resolved);
+    if (!s->allowed_dirs[s->allowed_dir_count]) return ADAM_ERR_ALLOC;
+    s->allowed_dir_count++;
+    return ADAM_OK;
+}
+
+adam_status_t adam_settings_set_memory(adam_settings_t *s,
+                                       const char *embedding_provider,
+                                       const char *embedding_model,
+                                       const char *api_key) {
+    if (!s) return ADAM_ERR_INVALID_PARAM;
+    if (embedding_provider) s->memory_embedding_provider = embedding_provider;
+    if (embedding_model)    s->memory_embedding_model = embedding_model;
+    if (api_key)            s->memory_api_key = api_key;
+    return ADAM_OK;
+}
+
 // ============================================================================
 // MARK: - Voice Settings (setters only — runtime is in adam_voice.c)
 // ============================================================================
@@ -427,6 +480,91 @@ void adam_history_clear(adam_history_t *h) {
 
 size_t adam_history_count(const adam_history_t *h) {
     return h ? h->count : 0;
+}
+
+adam_history_t *adam_history_clone(const adam_history_t *h) {
+    if (!h) return adam_history_create();
+
+    adam_history_t *c = calloc(1, sizeof(adam_history_t));
+    if (!c) return NULL;
+    if (h->count == 0) return c;
+
+    c->items = calloc(h->count, sizeof(adam_message_t));
+    if (!c->items) { free(c); return NULL; }
+    c->capacity = h->count;
+
+    for (size_t i = 0; i < h->count; i++) {
+        const adam_message_t *src = &h->items[i];
+        adam_message_t *dst = &c->items[i];
+        memset(dst, 0, sizeof(*dst));
+
+        dst->role = src->role;
+        dst->content = src->content ? strdup(src->content) : NULL;
+        if (src->content && !dst->content) goto fail;
+        dst->content_len = src->content_len;
+
+        dst->tool_call_id = src->tool_call_id ? strdup(src->tool_call_id) : NULL;
+        if (src->tool_call_id && !dst->tool_call_id) goto fail;
+
+        // Clone tool calls
+        if (src->tool_call_count > 0 && src->tool_calls) {
+            dst->tool_calls = calloc(src->tool_call_count,
+                                      sizeof(adam_tool_call_entry_t));
+            if (!dst->tool_calls) goto fail;
+            dst->tool_call_count = src->tool_call_count;
+            for (size_t j = 0; j < src->tool_call_count; j++) {
+                if (src->tool_calls[j].id) {
+                    dst->tool_calls[j].id = strdup(src->tool_calls[j].id);
+                    if (!dst->tool_calls[j].id) goto fail;
+                }
+                if (src->tool_calls[j].name) {
+                    dst->tool_calls[j].name = strdup(src->tool_calls[j].name);
+                    if (!dst->tool_calls[j].name) goto fail;
+                }
+                if (src->tool_calls[j].arguments_json) {
+                    dst->tool_calls[j].arguments_json =
+                        strdup(src->tool_calls[j].arguments_json);
+                    if (!dst->tool_calls[j].arguments_json) goto fail;
+                }
+            }
+        }
+
+        // Clone attachments
+        if (src->attachment_count > 0 && src->attachments) {
+            dst->attachments = calloc(src->attachment_count,
+                                       sizeof(adam_attachment_t));
+            if (!dst->attachments) goto fail;
+            dst->attachment_count = src->attachment_count;
+            for (size_t j = 0; j < src->attachment_count; j++) {
+                dst->attachments[j].type = src->attachments[j].type;
+                if (src->attachments[j].data && src->attachments[j].data_len) {
+                    dst->attachments[j].data =
+                        malloc(src->attachments[j].data_len);
+                    if (!dst->attachments[j].data) goto fail;
+                    memcpy(dst->attachments[j].data,
+                           src->attachments[j].data,
+                           src->attachments[j].data_len);
+                    dst->attachments[j].data_len = src->attachments[j].data_len;
+                }
+                if (src->attachments[j].filename) {
+                    dst->attachments[j].filename =
+                        strdup(src->attachments[j].filename);
+                    if (!dst->attachments[j].filename) goto fail;
+                }
+            }
+        }
+
+        c->count = i + 1; // track how many items are fully cloned
+    }
+    return c;
+
+fail:
+    // Items array was calloc'd so uninitialized slots have NULL pointers.
+    // adam_message_free handles NULL fields safely (free(NULL) is a no-op).
+    // Set count to capacity so adam_history_destroy frees all partially-cloned items.
+    c->count = c->capacity;
+    adam_history_destroy(c);
+    return NULL;
 }
 
 static adam_status_t history_grow(adam_history_t *h) {
@@ -563,6 +701,121 @@ static void history_compress(adam_history_t *h) {
 }
 
 // ============================================================================
+// MARK: - History Summarize (LLM-based compression)
+// ============================================================================
+
+// Forward declaration — defined later in this file
+static adam_llm_response_t dispatch_llm(
+    arena_t *arena, adam_settings_t *s,
+    const adam_message_t *msgs, size_t msg_count
+);
+
+adam_status_t adam_history_summarize(adam_settings_t *s, adam_history_t *h,
+                                     size_t target_token_count) {
+    if (!s || !h) return ADAM_ERR_INVALID_PARAM;
+    if (h->count <= 3) return ADAM_OK; // nothing to compress
+
+    // Determine target
+    if (target_token_count == 0) {
+        int ctx = adam_model_context_window(s->model);
+        target_token_count = ctx > 0 ? (size_t)(ctx * 3 / 4) : 8192;
+    }
+
+    // Find how many recent messages to keep (walk backwards until under target)
+    size_t keep = 0;
+    size_t tokens_kept = 0;
+    for (size_t i = h->count; i > 1; i--) {
+        size_t msg_tokens = adam_estimate_tokens(h->items[i - 1].content,
+                                                  h->items[i - 1].content_len);
+        msg_tokens += h->items[i - 1].tool_call_count * 50;
+        if (tokens_kept + msg_tokens > target_token_count / 2 && keep >= 2)
+            break;
+        tokens_kept += msg_tokens;
+        keep++;
+    }
+
+    size_t drop_end = h->count - keep; // exclusive: compress indices 1..drop_end-1
+    if (drop_end <= 1) return ADAM_OK; // nothing to compress
+
+    // Build the text of messages to summarize
+    size_t buf_size = 4096;
+    size_t pos = 0;
+    char *buf = malloc(buf_size);
+    if (!buf) return ADAM_ERR_ALLOC;
+
+    for (size_t i = 1; i < drop_end; i++) {
+        const char *role_str = "unknown";
+        switch (h->items[i].role) {
+            case ADAM_ROLE_USER:      role_str = "User"; break;
+            case ADAM_ROLE_ASSISTANT: role_str = "Assistant"; break;
+            case ADAM_ROLE_TOOL:      role_str = "Tool"; break;
+            case ADAM_ROLE_SYSTEM:    role_str = "System"; break;
+        }
+        const char *content = h->items[i].content ? h->items[i].content : "";
+        size_t need = strlen(role_str) + strlen(content) + 8;
+        if (pos + need >= buf_size) {
+            while (buf_size < pos + need + 1) buf_size *= 2;
+            char *new_buf = realloc(buf, buf_size);
+            if (!new_buf) { free(buf); return ADAM_ERR_ALLOC; }
+            buf = new_buf;
+        }
+        pos += (size_t)snprintf(buf + pos, buf_size - pos, "%s: %s\n",
+                                role_str, content);
+    }
+    buf[pos] = '\0';
+
+    // Build summarization request: system + user(conversation text)
+    adam_message_t sum_msgs[2];
+    memset(sum_msgs, 0, sizeof(sum_msgs));
+    sum_msgs[0].role = ADAM_ROLE_SYSTEM;
+    sum_msgs[0].content = (char *)"Summarize this conversation concisely, "
+                          "preserving key facts, decisions, and context. "
+                          "Output only the summary.";
+    sum_msgs[0].content_len = strlen(sum_msgs[0].content);
+    sum_msgs[1].role = ADAM_ROLE_USER;
+    sum_msgs[1].content = buf;
+    sum_msgs[1].content_len = pos;
+
+    // Call LLM
+    arena_t *arena = arena_create(s->arena_block_size);
+    if (!arena) { free(buf); return ADAM_ERR_ALLOC; }
+
+    adam_llm_response_t resp = dispatch_llm(arena, s, sum_msgs, 2);
+    free(buf);
+
+    if (resp.error != ADAM_OK || !resp.content) {
+        arena_destroy(arena);
+        // Fallback to dumb compression
+        history_compress(h);
+        return ADAM_OK;
+    }
+
+    // Replace compressed messages with a single summary
+    char *summary = strdup(resp.content);
+    arena_destroy(arena);
+    if (!summary) return ADAM_ERR_ALLOC;
+
+    // Free the messages being compressed
+    for (size_t i = 1; i < drop_end; i++)
+        adam_message_free(&h->items[i]);
+
+    // Build summary message in slot 1
+    memset(&h->items[1], 0, sizeof(adam_message_t));
+    h->items[1].role = ADAM_ROLE_ASSISTANT;
+    h->items[1].content = summary;
+    h->items[1].content_len = strlen(summary);
+
+    // Move kept messages right after the summary
+    if (keep > 0) {
+        memmove(&h->items[2], &h->items[drop_end],
+                keep * sizeof(adam_message_t));
+    }
+    h->count = 2 + keep; // system + summary + kept messages
+
+    return ADAM_OK;
+}
+
+// ============================================================================
 // MARK: - Internal: System Prompt
 // ============================================================================
 
@@ -615,10 +868,42 @@ static const char *build_system_prompt(arena_t *arena, adam_settings_t *s,
         fclose(f);
     }
 
-    // Memory enrichment
-    // TODO: implement when adam_memory.c is ready
-    // if (s->inject_memory && s->memory && user_message) { ... }
-    UNUSED_PARAM(user_message);
+    // Memory enrichment: search long-term memory and inject relevant results
+    if (s->inject_memory && s->memory && user_message) {
+        adam_memory_result_t *mem_results = NULL;
+        size_t mem_count = 0;
+        adam_status_t mrc = adam_memory_search(s->memory, arena,
+            user_message, s->memory_context, s->memory_max_results,
+            &mem_results, &mem_count);
+        if (mrc == ADAM_OK && mem_count > 0) {
+            pos += (size_t)snprintf(buf + pos, est - pos,
+                "## Relevant memories\n\n");
+            for (size_t mi = 0; mi < mem_count; mi++) {
+                if (s->memory_min_score > 0.0f &&
+                    mem_results[mi].score < s->memory_min_score)
+                    continue;
+                const char *content = mem_results[mi].content
+                    ? mem_results[mi].content : "";
+                size_t need = strlen(content) + 8;
+                if (pos + need >= est) {
+                    size_t new_est = est;
+                    while (new_est < pos + need + 1) new_est *= 2;
+                    char *new_buf = arena_alloc(arena, new_est);
+                    if (new_buf) {
+                        memcpy(new_buf, buf, pos);
+                        buf = new_buf;
+                        est = new_est;
+                    }
+                }
+                if (pos + need < est) {
+                    pos += (size_t)snprintf(buf + pos, est - pos,
+                        "- %s\n", content);
+                }
+            }
+            if (pos + 2 < est)
+                pos += (size_t)snprintf(buf + pos, est - pos, "\n");
+        }
+    }
 
     // Date/time injection
     if (s->inject_datetime) {
@@ -917,14 +1202,79 @@ adam_run_result_t adam_run(adam_settings_t *s, adam_history_t *history,
             break;
         }
 
+        // Check timeout
+        if (s->timeout_ms > 0) {
+            struct timespec ts_now;
+            clock_gettime(CLOCK_MONOTONIC, &ts_now);
+            double elapsed = (ts_now.tv_sec - ts_start.tv_sec) * 1000.0
+                           + (ts_now.tv_nsec - ts_start.tv_nsec) / 1e6;
+            if (elapsed >= (double)s->timeout_ms) {
+                ADAM_LOG(s, ADAM_LOG_WARN, "adam_run: timeout at iteration %d",
+                         iteration);
+                result.status = ADAM_ERR_TIMEOUT;
+                result.final_response = strdup("(timeout)");
+                break;
+            }
+        }
+
         // Reset arena for this iteration
         arena_reset(turn);
 
-        // Trim history if too long
+        // Smart context window awareness: summarize when approaching limit
+        {
+            int ctx_window = adam_model_context_window(s->model);
+            if (ctx_window > 0) {
+                size_t est = adam_history_estimate_tokens(history);
+                size_t threshold = s->summarize_threshold > 0
+                    ? (size_t)s->summarize_threshold
+                    : (size_t)(ctx_window * 3 / 4);
+                if (est > threshold) {
+                    ADAM_LOG(s, ADAM_LOG_INFO,
+                             "history tokens (%zu) exceed threshold (%zu), summarizing",
+                             est, threshold);
+                    adam_history_summarize(s, history, threshold / 2);
+                }
+            }
+        }
+
+        // Fallback: count-based compression if token estimation unavailable
         if ((int)history->count > s->max_history + 1) {
             ADAM_LOG(s, ADAM_LOG_DEBUG, "compressing history (%zu messages)",
                      history->count);
             history_compress(history);
+        }
+
+        // Pre-send guardrail
+        if (s->on_before_send) {
+            if (s->on_before_send(s->before_send_ctx,
+                                   history->items, history->count)) {
+                result.status = ADAM_ERR_GUARDRAIL;
+                result.final_response = strdup("blocked by pre-send guardrail");
+                break;
+            }
+        }
+
+        // Check cache
+        uint64_t _cache_key = 0;
+        if (s->cache) {
+            extern uint64_t adam_cache_hash(const char *, const adam_message_t *, size_t);
+            extern const char *adam_cache_lookup(adam_cache_t *, uint64_t,
+                                                  int *, int *);
+            _cache_key = adam_cache_hash(s->model, history->items, history->count);
+            int c_in = 0, c_out = 0;
+            const char *cached = adam_cache_lookup(s->cache, _cache_key,
+                                                    &c_in, &c_out);
+            if (cached) {
+                result.status = ADAM_OK;
+                result.final_response = strdup(cached);
+                result.input_tokens += c_in;
+                result.output_tokens += c_out;
+                result.total_iterations = iteration + 1;
+                adam_history_append_assistant(history, cached, NULL, 0);
+                if (s->on_response)
+                    s->on_response(s->callback_ctx, cached, strlen(cached));
+                break;
+            }
         }
 
         // Rate limiter
@@ -938,8 +1288,8 @@ adam_run_result_t adam_run(adam_settings_t *s, adam_history_t *history,
         if (resp.error != ADAM_OK) {
             if (resp.error == ADAM_ERR_CONTEXT_OVERFLOW && iteration <= 2) {
                 ADAM_LOG(s, ADAM_LOG_WARN,
-                         "context overflow, compressing and retrying");
-                history_compress(history);
+                         "context overflow, summarizing and retrying");
+                adam_history_summarize(s, history, 0);
                 continue;
             }
             result.status = resp.error;
@@ -956,6 +1306,17 @@ adam_run_result_t adam_run(adam_settings_t *s, adam_history_t *history,
         rate_limit_record(s, resp.input_tokens + resp.output_tokens);
         result.total_iterations = iteration + 1;
 
+        // Post-receive guardrail
+        if (s->on_after_receive) {
+            if (s->on_after_receive(s->after_receive_ctx, resp.content,
+                                     resp.tool_calls, resp.tool_call_count)) {
+                result.status = ADAM_ERR_GUARDRAIL;
+                result.final_response =
+                    strdup("blocked by post-receive guardrail");
+                break;
+            }
+        }
+
         // No tool calls → final response
         if (resp.tool_call_count == 0) {
             const char *text = resp.content ? resp.content : "";
@@ -965,6 +1326,14 @@ adam_run_result_t adam_run(adam_settings_t *s, adam_history_t *history,
 
             if (s->on_response) {
                 s->on_response(s->callback_ctx, text, strlen(text));
+            }
+
+            // Store in cache
+            if (s->cache) {
+                extern void adam_cache_store(adam_cache_t *, uint64_t,
+                                             const char *, int, int);
+                adam_cache_store(s->cache, _cache_key, text,
+                                resp.input_tokens, resp.output_tokens);
             }
 
             ADAM_LOG(s, ADAM_LOG_INFO,
@@ -1044,6 +1413,84 @@ adam_run_result_t adam_run(adam_settings_t *s, adam_history_t *history,
     result.cost_usd = compute_cost(s->model, result.input_tokens,
                                     result.output_tokens);
 
+#ifndef ADAM_NO_SQLITE
+    // Auto-save session
+    if (s->auto_save && s->session_id && s->memory) {
+        adam_status_t save_rc = adam_session_save(s->memory, s->session_id,
+                                                  history);
+        if (save_rc != ADAM_OK) {
+            ADAM_LOG(s, ADAM_LOG_WARN, "auto-save failed: %s",
+                     adam_status_string(save_rc));
+        } else {
+            ADAM_LOG(s, ADAM_LOG_DEBUG, "auto-saved session %s", s->session_id);
+        }
+    }
+
+    // Memory extraction: ask LLM to extract key facts from conversation
+    if (s->memory_extract && s->memory && result.status == ADAM_OK
+        && history->count >= 3) {
+        arena_t *extract_arena = arena_create(s->arena_block_size);
+        if (extract_arena) {
+            // Build extraction prompt from last few messages (current turn)
+            size_t ebuf_size = 4096;
+            char *ebuf = malloc(ebuf_size);
+            if (ebuf) {
+                size_t epos = 0;
+                // Include the last few messages (up to 10)
+                size_t start = history->count > 10 ? history->count - 10 : 1;
+                for (size_t i = start; i < history->count; i++) {
+                    const char *role_str = "unknown";
+                    switch (history->items[i].role) {
+                        case ADAM_ROLE_USER:      role_str = "User"; break;
+                        case ADAM_ROLE_ASSISTANT: role_str = "Assistant"; break;
+                        case ADAM_ROLE_TOOL:      role_str = "Tool"; break;
+                        case ADAM_ROLE_SYSTEM:    role_str = "System"; break;
+                    }
+                    const char *c = history->items[i].content
+                                    ? history->items[i].content : "";
+                    size_t need = strlen(role_str) + strlen(c) + 8;
+                    if (epos + need >= ebuf_size) {
+                        while (ebuf_size < epos + need + 1) ebuf_size *= 2;
+                        char *new_buf = realloc(ebuf, ebuf_size);
+                        if (!new_buf) { free(ebuf); ebuf = NULL; break; }
+                        ebuf = new_buf;
+                    }
+                    epos += (size_t)snprintf(ebuf + epos, ebuf_size - epos,
+                                             "%s: %s\n", role_str, c);
+                }
+
+                if (ebuf) {
+                    ebuf[epos] = '\0';
+                    adam_message_t ext_msgs[2];
+                    memset(ext_msgs, 0, sizeof(ext_msgs));
+                    ext_msgs[0].role = ADAM_ROLE_SYSTEM;
+                    ext_msgs[0].content = (char *)
+                        "Extract key facts, preferences, and decisions from "
+                        "this conversation. Return each fact on its own line. "
+                        "If nothing worth remembering, return NONE.";
+                    ext_msgs[0].content_len = strlen(ext_msgs[0].content);
+                    ext_msgs[1].role = ADAM_ROLE_USER;
+                    ext_msgs[1].content = ebuf;
+                    ext_msgs[1].content_len = epos;
+
+                    adam_llm_response_t ext_resp = dispatch_llm(
+                        extract_arena, s, ext_msgs, 2);
+
+                    if (ext_resp.error == ADAM_OK && ext_resp.content
+                        && strstr(ext_resp.content, "NONE") == NULL) {
+                        adam_memory_add(s->memory, ext_resp.content,
+                                        s->memory_context, "conversation");
+                        ADAM_LOG(s, ADAM_LOG_DEBUG,
+                                 "extracted memory from conversation");
+                    }
+                    free(ebuf);
+                }
+            }
+            arena_destroy(extract_arena);
+        }
+    }
+#endif // ADAM_NO_SQLITE
+
     // Elapsed time
     struct timespec ts_end;
     clock_gettime(CLOCK_MONOTONIC, &ts_end);
@@ -1058,6 +1505,215 @@ void adam_run_result_free(adam_run_result_t *r) {
     if (!r) return;
     free(r->final_response);
     r->final_response = NULL;
+}
+
+// ============================================================================
+// MARK: - Structured JSON Output
+// ============================================================================
+
+#define JSMN_STATIC
+#include "jsmn.h"
+
+static int is_valid_json(const char *s) {
+    if (!s || !*s) return 0;
+    jsmntok_t tokens[128];
+    jsmn_parser parser;
+    jsmn_init(&parser);
+    int r = jsmn_parse(&parser, s, strlen(s), tokens, 128);
+    return (r >= 1);
+}
+
+adam_json_result_t adam_run_json(adam_settings_t *s, adam_history_t *h,
+                                 const char *user_message,
+                                 const char *json_hint,
+                                 int max_retries) {
+    adam_json_result_t jr;
+    memset(&jr, 0, sizeof(jr));
+
+    if (!s || !h) {
+        jr.base.status = ADAM_ERR_INVALID_PARAM;
+        return jr;
+    }
+
+    if (max_retries <= 0) max_retries = 3;
+
+    // Enable JSON mode
+    const char *saved_format = s->response_format;
+    s->response_format = "json";
+
+    // Build prompt with hint
+    char *prompt = NULL;
+    if (json_hint && user_message) {
+        size_t len = strlen(user_message) + strlen(json_hint) + 64;
+        prompt = malloc(len);
+        if (prompt) {
+            snprintf(prompt, len, "%s\n\nRespond with valid JSON: %s",
+                     user_message, json_hint);
+        }
+    }
+
+    for (int attempt = 0; attempt <= max_retries; attempt++) {
+        const char *msg;
+        if (attempt == 0) {
+            msg = prompt ? prompt : user_message;
+        } else {
+            msg = "Your previous response was not valid JSON. "
+                  "Please respond with valid JSON only.";
+        }
+
+        adam_run_result_t r = adam_run(s, h, msg);
+
+        jr.base.input_tokens += r.input_tokens;
+        jr.base.output_tokens += r.output_tokens;
+        jr.base.cost_usd += r.cost_usd;
+        jr.base.total_iterations += r.total_iterations;
+        jr.base.elapsed_ms += r.elapsed_ms;
+
+        if (r.status != ADAM_OK) {
+            jr.base.status = r.status;
+            jr.base.final_response = r.final_response;
+            jr.retries_used = attempt;
+            break;
+        }
+
+        if (is_valid_json(r.final_response)) {
+            jr.base.status = ADAM_OK;
+            jr.base.final_response = r.final_response;
+            jr.json_valid = 1;
+            jr.retries_used = attempt;
+            break;
+        }
+
+        // Invalid JSON — retry or give up
+        jr.retries_used = attempt;
+        if (attempt == max_retries) {
+            jr.base.status = ADAM_OK;
+            jr.base.final_response = r.final_response;
+            jr.json_valid = 0;
+        } else {
+            adam_run_result_free(&r);
+        }
+    }
+
+    free(prompt);
+    s->response_format = saved_format;
+    return jr;
+}
+
+void adam_json_result_free(adam_json_result_t *r) {
+    if (!r) return;
+    adam_run_result_free(&r->base);
+}
+
+char *adam_json_extract(const char *json, const char *key) {
+    if (!json || !key) return NULL;
+
+    // First pass: count tokens needed
+    jsmn_parser parser;
+    jsmn_init(&parser);
+    int ntok = jsmn_parse(&parser, json, strlen(json), NULL, 0);
+    if (ntok < 2) return NULL;
+
+    // Allocate exact number of tokens
+    jsmntok_t *tokens = malloc((size_t)ntok * sizeof(jsmntok_t));
+    if (!tokens) return NULL;
+
+    jsmn_init(&parser);
+    ntok = jsmn_parse(&parser, json, strlen(json), tokens, (unsigned int)ntok);
+    if (ntok < 2) { free(tokens); return NULL; }
+
+    size_t klen = strlen(key);
+    for (int i = 1; i < ntok - 1; i++) {
+        if (tokens[i].type == JSMN_STRING
+            && (size_t)(tokens[i].end - tokens[i].start) == klen
+            && memcmp(json + tokens[i].start, key, klen) == 0) {
+            // Found key — extract value
+            jsmntok_t *val = &tokens[i + 1];
+            size_t vlen = (size_t)(val->end - val->start);
+            char *result = malloc(vlen + 1);
+            if (!result) { free(tokens); return NULL; }
+            memcpy(result, json + val->start, vlen);
+            result[vlen] = '\0';
+            free(tokens);
+            return result;
+        }
+    }
+    free(tokens);
+    return NULL;
+}
+
+// ============================================================================
+// MARK: - Multi-Agent Tool
+// ============================================================================
+
+adam_tool_result_t adam_tool_agent(arena_t *arena, void *ctx,
+                                   const char *args_json, size_t args_len) {
+    adam_tool_result_t res = { .for_llm = NULL, .for_user = NULL, .success = 0 };
+    adam_agent_tool_ctx_t *actx = (adam_agent_tool_ctx_t *)ctx;
+    if (!actx || !actx->settings || !args_json) {
+        res.for_llm = arena_strdup(arena, "Error: agent not configured");
+        return res;
+    }
+
+    // Parse {"message":"..."}
+    jsmntok_t tokens[16];
+    jsmn_parser parser;
+    jsmn_init(&parser);
+    int ntok = jsmn_parse(&parser, args_json, args_len, tokens, 16);
+    if (ntok < 1) {
+        res.for_llm = arena_strdup(arena, "Error: invalid JSON");
+        return res;
+    }
+
+    const char *message = NULL;
+    for (int i = 1; i < ntok - 1; i++) {
+        if (tokens[i].type == JSMN_STRING
+            && (size_t)(tokens[i].end - tokens[i].start) == 7
+            && memcmp(args_json + tokens[i].start, "message", 7) == 0
+            && tokens[i + 1].type == JSMN_STRING) {
+            size_t len = (size_t)(tokens[i + 1].end - tokens[i + 1].start);
+            char *s = arena_alloc(arena, len + 1);
+            if (s) { memcpy(s, args_json + tokens[i + 1].start, len); s[len] = '\0'; }
+            message = s;
+            break;
+        }
+    }
+
+    if (!message) {
+        res.for_llm = arena_strdup(arena, "Error: 'message' is required");
+        return res;
+    }
+
+    // Create or reuse history
+    adam_history_t *h = actx->history;
+    int own_history = 0;
+    if (!h) {
+        h = adam_history_create();
+        own_history = 1;
+        if (!h) {
+            res.for_llm = arena_strdup(arena, "Error: allocation failed");
+            return res;
+        }
+    }
+
+    // Run sub-agent
+    adam_run_result_t run = adam_run(actx->settings, h, message);
+
+    if (run.status == ADAM_OK && run.final_response) {
+        res.for_llm = arena_strdup(arena, run.final_response);
+        res.success = 1;
+    } else {
+        const char *err = run.final_response
+            ? run.final_response : adam_status_string(run.status);
+        char buf[512];
+        snprintf(buf, sizeof(buf), "Sub-agent error: %s", err);
+        res.for_llm = arena_strdup(arena, buf);
+    }
+
+    adam_run_result_free(&run);
+    if (own_history) adam_history_destroy(h);
+
+    return res;
 }
 
 // ============================================================================

@@ -18,6 +18,8 @@ LLAMA_DIR     := $(ADAM_ROOT)modules/llama.cpp
 LLAMA_BUILD   := $(LLAMA_DIR)/build
 WHISPER_DIR   := $(ADAM_ROOT)modules/whisper.cpp
 WHISPER_BUILD := $(WHISPER_DIR)/build
+SQLITE_MEMORY_DIR := $(ADAM_ROOT)modules/sqlite-memory
+SQLITE_VECTOR_DIR := $(ADAM_ROOT)modules/sqlite-vector
 
 # ============================================================================
 # Compiler settings
@@ -29,6 +31,7 @@ CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -O2
 CFLAGS += -Isrc -I$(MINIAUDIO_DIR) -I$(SQLITE_DIR)
 CFLAGS += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include
 CFLAGS += -I$(WHISPER_DIR)/include
+CFLAGS += -I$(SQLITE_MEMORY_DIR)/src -I$(SQLITE_VECTOR_DIR)/src -I$(SQLITE_VECTOR_DIR)/libs
 
 # SQLite compile-time options
 SQLITE_FLAGS := -DSQLITE_THREADSAFE=1 \
@@ -99,7 +102,8 @@ endif
 
 SRCS := src/arena.c src/adam.c src/adam_json.c src/adam_http.c src/adam_stream.c \
         src/adam_voice.c src/adam_audio.c src/adam_session.c src/adam_local.c \
-        src/adam_stt_local.c
+        src/adam_stt_local.c src/adam_memory.c src/adam_evolve.c src/adam_research.c \
+        src/adam_tools.c src/adam_cache.c
 OBJS := $(SRCS:.c=.o)
 
 # SQLite amalgamation (compiled separately with its own flags)
@@ -109,17 +113,47 @@ SQLITE_OBJ := $(SQLITE_DIR)/sqlite3.o
 NET_OBJ     := $(basename $(NET_SRC)).o
 TTS_SYS_OBJ := $(basename $(TTS_SYS_SRC)).o
 
+# sqlite-vector objects (compiled with -DSQLITE_CORE, no -Wpedantic)
+SQLITE_VECTOR_SRCS := $(SQLITE_VECTOR_DIR)/src/sqlite-vector.c \
+                      $(SQLITE_VECTOR_DIR)/src/distance-cpu.c \
+                      $(SQLITE_VECTOR_DIR)/src/distance-neon.c \
+                      $(SQLITE_VECTOR_DIR)/src/distance-avx2.c \
+                      $(SQLITE_VECTOR_DIR)/src/distance-avx512.c \
+                      $(SQLITE_VECTOR_DIR)/src/distance-sse2.c \
+                      $(SQLITE_VECTOR_DIR)/src/distance-rvv.c
+SQLITE_VECTOR_OBJS := $(patsubst $(SQLITE_VECTOR_DIR)/src/%.c,$(SQLITE_VECTOR_DIR)/src/%.o,$(SQLITE_VECTOR_SRCS))
+
+# sqlite-memory objects (compiled with -DSQLITE_CORE, no -Wpedantic)
+SQLITE_MEMORY_SRCS := $(SQLITE_MEMORY_DIR)/src/sqlite-memory.c \
+                      $(SQLITE_MEMORY_DIR)/src/dbmem-utils.c \
+                      $(SQLITE_MEMORY_DIR)/src/dbmem-parser.c \
+                      $(SQLITE_MEMORY_DIR)/src/dbmem-search.c \
+                      $(SQLITE_MEMORY_DIR)/src/md4c.c \
+                      $(SQLITE_MEMORY_DIR)/src/dbmem-lembed.c
+SQLITE_MEMORY_OBJS := $(patsubst $(SQLITE_MEMORY_DIR)/src/%.c,$(SQLITE_MEMORY_DIR)/src/%.o,$(SQLITE_MEMORY_SRCS))
+
+# sqlite-memory common flags
+DBMEM_CFLAGS := -std=c11 -O2 -DSQLITE_CORE -DDBMEM_OMIT_REMOTE_ENGINE \
+                -I$(SQLITE_MEMORY_DIR)/src -I$(SQLITE_VECTOR_DIR)/src \
+                -I$(SQLITE_VECTOR_DIR)/libs -I$(SQLITE_DIR) \
+                -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include
+
+SQLITE_MEMORY_HTTP_OBJ :=
+ifeq ($(UNAME_S),Linux)
+  DBMEM_CFLAGS += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
+endif
+
 # ============================================================================
 # Targets
 # ============================================================================
 
-.PHONY: all clean test live voice talk chat deps mbedtls curl llama whisper
+.PHONY: all clean test live voice talk chat memory deps mbedtls curl llama whisper
 
 all: libadam.a
 
 # --- Static library ---
 
-libadam.a: $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ)
+libadam.a: $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) $(SQLITE_VECTOR_OBJS) $(SQLITE_MEMORY_OBJS) $(SQLITE_MEMORY_HTTP_OBJ)
 	ar rcs $@ $^
 
 src/%.o: src/%.c
@@ -136,13 +170,22 @@ src/adam_net_apple.o: src/adam_net_apple.m
 src/adam_tts_system.o: src/adam_tts_system.m
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# sqlite-vector — compiled with -DSQLITE_CORE (no -Wpedantic)
+$(SQLITE_VECTOR_DIR)/src/%.o: $(SQLITE_VECTOR_DIR)/src/%.c
+	$(CC) -std=c11 -O3 -DSQLITE_CORE -I$(SQLITE_VECTOR_DIR)/src -I$(SQLITE_VECTOR_DIR)/libs -I$(SQLITE_DIR) -c $< -o $@
+
+# sqlite-memory — compiled with -DSQLITE_CORE (no -Wpedantic)
+$(SQLITE_MEMORY_DIR)/src/%.o: $(SQLITE_MEMORY_DIR)/src/%.c
+	$(CC) $(DBMEM_CFLAGS) -c $< -o $@
+
+
 # --- Tests ---
 
 test: test_adam
 	./test_adam
 
 test_adam: libadam.a test/test_adam.c
-	$(CC) $(CFLAGS) -g -fsanitize=address,undefined \
+	$(CC) $(CFLAGS) -O0 -g -fsanitize=address,undefined \
 		test/test_adam.c -L. -ladam $(LIBS) $(LDFLAGS) -o $@
 
 live: test_live
@@ -158,6 +201,14 @@ voice: test_voice_interactive
 test_voice_interactive: libadam.a test/test_voice_interactive.c
 	$(CC) $(CFLAGS) -g \
 		test/test_voice_interactive.c \
+		-L. -ladam $(LIBS) $(LDFLAGS) -o $@
+
+memory: test_memory
+	./test_memory
+
+test_memory: libadam.a test/test_memory.c
+	$(CC) $(CFLAGS) -g \
+		test/test_memory.c \
 		-L. -ladam $(LIBS) $(LDFLAGS) -o $@
 
 chat: test_chat
@@ -235,5 +286,6 @@ curl: mbedtls
 # --- Clean ---
 
 clean:
-	rm -f $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) libadam.a test_adam test_live test_chat test_voice_interactive test_voice_talk
+	rm -f $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) libadam.a test_adam test_live test_chat test_memory test_evolve test_voice_interactive test_voice_talk test_tools
+	rm -f $(SQLITE_VECTOR_OBJS) $(SQLITE_MEMORY_OBJS) $(SQLITE_MEMORY_HTTP_OBJ)
 	rm -rf test_adam.dSYM test_live.dSYM test_voice_interactive.dSYM test_voice_talk.dSYM
