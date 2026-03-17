@@ -15,7 +15,7 @@
 // ============================================================================
 
 @interface AdamSpeechDelegate : NSObject <AVSpeechSynthesizerDelegate>
-@property (nonatomic, strong) dispatch_semaphore_t semaphore;
+@property (nonatomic, assign) volatile int done;
 @end
 
 @implementation AdamSpeechDelegate
@@ -23,13 +23,13 @@
 - (void)speechSynthesizer:(AVSpeechSynthesizer *)synthesizer
  didFinishSpeechUtterance:(AVSpeechUtterance *)utterance {
     UNUSED_PARAM(synthesizer); UNUSED_PARAM(utterance);
-    dispatch_semaphore_signal(self.semaphore);
+    self.done = 1;
 }
 
 - (void)speechSynthesizer:(AVSpeechSynthesizer *)synthesizer
 didCancelSpeechUtterance:(AVSpeechUtterance *)utterance {
     UNUSED_PARAM(synthesizer); UNUSED_PARAM(utterance);
-    dispatch_semaphore_signal(self.semaphore);
+    self.done = 1;
 }
 
 @end
@@ -51,24 +51,22 @@ adam_status_t adam_tts_system_speak(const char *text, const char *language) {
         utterance.pitchMultiplier = 1.0f;
         utterance.volume = 1.0f;
 
-        // Set language if specified, otherwise let the system auto-detect
         if (language) {
             utterance.voice = [AVSpeechSynthesisVoice
                 voiceWithLanguage:[NSString stringWithUTF8String:language]];
         }
 
-        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-
         AdamSpeechDelegate *delegate = [[AdamSpeechDelegate alloc] init];
-        delegate.semaphore = sem;
 
         AVSpeechSynthesizer *synth = [[AVSpeechSynthesizer alloc] init];
         synth.delegate = delegate;
         [synth speakUtterance:utterance];
 
-        // Wait for speech to complete (timeout: 60s)
-        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW,
-                                                    60 * NSEC_PER_SEC));
+        // Poll for completion — allows SIGINT to interrupt
+        while (!delegate.done) {
+            [[NSRunLoop currentRunLoop] runUntilDate:
+                [NSDate dateWithTimeIntervalSinceNow:0.1]];
+        }
     }
 
     return ADAM_OK;

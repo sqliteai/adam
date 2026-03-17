@@ -209,6 +209,29 @@ static const char *find_whisper(int argc, char **argv, const char *fallback) {
 }
 
 // ============================================================================
+// MARK: - Strip thinking tags from local model output
+// ============================================================================
+
+// Qwen3.5 and other reasoning models wrap their thinking in
+// <think>...</think> tags. Strip these for voice output.
+static const char *strip_think_tags(const char *text) {
+    if (!text) return text;
+    // Find </think> — everything after it is the actual response
+    const char *end_tag = strstr(text, "</think>");
+    if (end_tag) {
+        const char *after = end_tag + 8; // strlen("</think>") = 8
+        while (*after == '\n' || *after == '\r' || *after == ' ') after++;
+        return after;
+    }
+    // No think tags — check if it starts with <think> (incomplete)
+    if (strncmp(text, "<think>", 7) == 0) {
+        // Thinking block never closed — return empty
+        return "";
+    }
+    return text;
+}
+
+// ============================================================================
 // MARK: - Log suppression for local models
 // ============================================================================
 
@@ -281,6 +304,8 @@ int main(int argc, char **argv) {
             }
         }
         adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, whisper);
+        // Don't force a language — let whisper auto-detect.
+        // But if the user wants to force Italian: s->stt_language = "it";
         stt_str = whisper;
 
         // TTS: OS built-in
@@ -467,12 +492,16 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        printf("    Adam: %s\n", r.final_response ? r.final_response : "...");
+        // Strip <think>...</think> tags from reasoning models
+        const char *response = strip_think_tags(r.final_response);
+        if (!response || !response[0]) response = "(no response)";
+
+        printf("    Adam: %s\n", response);
         total_cost += r.cost_usd;
 
         // 4. Speak
-        if (r.final_response && !g_quit) {
-            adam_tts_speak(s, r.final_response);
+        if (response[0] != '(' && !g_quit) {
+            adam_tts_speak(s, response);
         }
 
         printf("    [%d in/%d out | $%.4f | %.0fms]\n\n",
