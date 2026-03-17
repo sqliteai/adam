@@ -53,7 +53,8 @@ LLAMA_LIBS := $(LLAMA_BUILD)/src/libllama.a \
               $(LLAMA_BUILD)/ggml/src/libggml-cpu.a \
               $(LLAMA_BUILD)/ggml/src/libggml-base.a
 
-# Whisper uses only libwhisper.a — ggml symbols come from llama's ggml
+# Whisper uses llama's ggml (symlinked: whisper.cpp/ggml → llama.cpp/ggml).
+# Only libwhisper.a is needed — ggml symbols come from LLAMA_LIBS.
 WHISPER_LIBS := $(WHISPER_BUILD)/src/libwhisper.a
 
 ifeq ($(UNAME_S),Darwin)
@@ -202,6 +203,8 @@ llama:
 	cmake --build $(LLAMA_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc) --target llama --target ggml
 
 whisper:
+	@# whisper.cpp/ggml must be symlinked to llama.cpp/ggml
+	@test -L $(WHISPER_DIR)/ggml || (rm -rf $(WHISPER_DIR)/ggml && ln -s ../llama.cpp/ggml $(WHISPER_DIR)/ggml)
 	cmake -B $(WHISPER_BUILD) -S $(WHISPER_DIR) \
 		-DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF \
 		-DWHISPER_BUILD_EXAMPLES=OFF \

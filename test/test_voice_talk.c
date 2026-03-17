@@ -478,9 +478,14 @@ int main(int argc, char **argv) {
 
         if (g_quit) { arena_destroy(stt_arena); break; }
 
-        if (stt_rc != ADAM_OK || !transcript || strlen(transcript) == 0) {
-            printf("    (transcription failed: %s)\n\n",
+        if (stt_rc != ADAM_OK) {
+            printf("    (transcription error: %s)\n\n",
                    adam_status_string(stt_rc));
+            arena_destroy(stt_arena);
+            continue;
+        }
+        if (!transcript || strlen(transcript) == 0) {
+            printf("    (no speech detected, try again)\n\n");
             arena_destroy(stt_arena);
             continue;
         }
