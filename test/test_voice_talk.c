@@ -243,13 +243,28 @@ int main(int argc, char **argv) {
         llm_str = gguf;
 
         // STT: whisper.cpp
-        // Prefer multilingual model (supports all languages)
-        // Fall back to English-only if multilingual not found
+        // Auto-detect whisper model: prefer multilingual, fall back to English-only
         const char *whisper = find_whisper(argc, argv, NULL);
         if (!whisper) {
-            FILE *f = fopen("models/ggml-base.bin", "r");
-            if (f) { fclose(f); whisper = "models/ggml-base.bin"; }
-            else whisper = "models/ggml-base.en.bin";
+            const char *candidates[] = {
+                "models/ggml-base.bin",       // multilingual (preferred)
+                "models/ggml-base.en.bin",    // English-only
+                "models/ggml-small.bin",
+                "models/ggml-tiny.bin",
+                "models/ggml-tiny.en.bin",
+                NULL
+            };
+            for (int i = 0; candidates[i]; i++) {
+                FILE *f = fopen(candidates[i], "r");
+                if (f) { fclose(f); whisper = candidates[i]; break; }
+            }
+            if (!whisper) {
+                fprintf(stderr, "Error: no whisper model found in models/\n");
+                fprintf(stderr, "Download from: https://huggingface.co/ggerganov/whisper.cpp\n");
+                adam_settings_destroy(s);
+                adam_cleanup();
+                return 1;
+            }
         }
         adam_settings_set_stt(s, ADAM_STT_LOCAL, NULL, NULL, whisper);
         stt_str = whisper;
