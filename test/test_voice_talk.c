@@ -349,14 +349,26 @@ int main(int argc, char **argv) {
         mode_str = "CLOUD";
     }
 
-    adam_settings_set_identity(s,
-        "You are a friendly voice assistant having a natural conversation. "
-        "Keep responses short and conversational — 1-2 sentences. "
-        "Always detect and reply in the same language the user speaks. "
-        "Do not use markdown, bullet points, or code. "
-        "Speak naturally as if in a real conversation.");
-
-    s->max_tokens = 150;
+    if (local) {
+        // Local models (especially small ones like 0.8B) need explicit
+        // instructions to not use thinking/reasoning and to be brief.
+        // Also need more tokens since reasoning models use tokens for <think>.
+        adam_settings_set_identity(s,
+            "You are a voice assistant. "
+            "Reply directly in 1 sentence. Do not think or reason. "
+            "Do not use <think> tags. Do not use markdown. "
+            "Reply in the same language the user speaks. "
+            "Be very brief.");
+        s->max_tokens = 256;
+    } else {
+        adam_settings_set_identity(s,
+            "You are a friendly voice assistant having a natural conversation. "
+            "Keep responses short and conversational — 1-2 sentences. "
+            "Always detect and reply in the same language the user speaks. "
+            "Do not use markdown, bullet points, or code. "
+            "Speak naturally as if in a real conversation.");
+        s->max_tokens = 150;
+    }
     adam_settings_set_logger(s, on_log, NULL, ADAM_LOG_WARN);
 
     printf("\n");
