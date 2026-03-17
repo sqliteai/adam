@@ -160,6 +160,29 @@ adam_status_t adam_stt_local_transcribe(
         return ADAM_ERR_VOICE;
     }
 
+    // Detect language and update settings so TTS uses the right voice.
+    // whisper_full_lang_id returns the detected language index,
+    // whisper_lang_str converts it to a code like "it", "fr", "en".
+    {
+        int lang_id = whisper_full_lang_id(wctx->ctx);
+        if (lang_id >= 0) {
+            const char *lang_code = whisper_lang_str(lang_id);
+            if (lang_code) {
+                // Build BCP-47 locale: "it" → "it-IT", "fr" → "fr-FR", "en" → "en-US"
+                // AVSpeechSynthesizer needs the full locale for best voice selection
+                static char lang_buf[8];
+                if (strlen(lang_code) == 2) {
+                    char upper[3] = { (char)(lang_code[0] - 32), (char)(lang_code[1] - 32), '\0' };
+                    snprintf(lang_buf, sizeof(lang_buf), "%s-%s", lang_code, upper);
+                } else {
+                    snprintf(lang_buf, sizeof(lang_buf), "%s", lang_code);
+                }
+                // Store so adam_tts_system_speak picks it up
+                s->stt_language = lang_buf;
+            }
+        }
+    }
+
     // Collect segments into a single string
     int n_seg = whisper_full_n_segments(wctx->ctx);
     if (n_seg <= 0) {
