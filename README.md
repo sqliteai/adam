@@ -1,8 +1,8 @@
 # Adam
 
-Embeddable AI agent library in C. Single static library, 138 tests, zero mandatory dependencies.
+Embeddable AI agent library in C.
 
-Adam gives you a complete agent loop — tool calling, memory, sessions, voice, streaming, structured output — in one `#include`. Works with cloud APIs (Anthropic, OpenAI, Groq, Together, xAI) and local models (llama.cpp) through the same interface. Compiles on macOS, Linux, Windows, iOS, Android, and WASM.
+Adam gives you a complete agent loop: tool calling, memory, sessions, voice, streaming, structured output, in one `#include`. Works with cloud APIs (Anthropic, OpenAI, Groq, Together, xAI) and local models (llama.cpp) through the same interface. Compiles on macOS, Linux, Windows, iOS, Android, and WASM.
 
 ## Quick Start
 

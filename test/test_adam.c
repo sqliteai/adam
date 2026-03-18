@@ -1542,6 +1542,172 @@ TEST(json_build_json_mode) {
     arena_destroy(a);
 }
 
+TEST(json_build_gemini_simple) {
+    arena_t *a = arena_create(8192);
+    adam_message_t msgs[2];
+    memset(msgs, 0, sizeof(msgs));
+    msgs[0].role = ADAM_ROLE_SYSTEM;
+    msgs[0].content = "You are helpful.";
+    msgs[0].content_len = strlen(msgs[0].content);
+    msgs[1].role = ADAM_ROLE_USER;
+    msgs[1].content = "Hello";
+    msgs[1].content_len = 5;
+
+    const char *json = adam_json_build_request(
+        a, ADAM_API_GEMINI, "gemini-2.0-flash",
+        msgs, 2, NULL, 0, 0.7f, 4096, 1.0f, NULL);
+
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"systemInstruction\"") != NULL);
+    ASSERT(strstr(json, "You are helpful.") != NULL);
+    ASSERT(strstr(json, "\"contents\"") != NULL);
+    ASSERT(strstr(json, "\"role\":\"user\"") != NULL);
+    ASSERT(strstr(json, "Hello") != NULL);
+    ASSERT(strstr(json, "\"generationConfig\"") != NULL);
+    ASSERT(strstr(json, "\"maxOutputTokens\":4096") != NULL);
+    // Should NOT have model in JSON body (it's in URL for Gemini)
+    ASSERT(strstr(json, "\"model\"") == NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_build_gemini_with_tools) {
+    arena_t *a = arena_create(8192);
+    adam_message_t msg = {
+        .role = ADAM_ROLE_USER, .content = "Search for X", .content_len = 12
+    };
+    adam_tool_def_t tool = {
+        .name = "search",
+        .description = "Search the web",
+        .parameters_json = "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}"
+    };
+
+    const char *json = adam_json_build_request(
+        a, ADAM_API_GEMINI, "gemini-2.0-flash",
+        &msg, 1, &tool, 1, 0.7f, 4096, 1.0f, NULL);
+
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"functionDeclarations\"") != NULL);
+    ASSERT(strstr(json, "\"name\":\"search\"") != NULL);
+    ASSERT(strstr(json, "\"description\":\"Search the web\"") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_gemini_text) {
+    arena_t *a = arena_create(8192);
+    const char *json =
+        "{\"candidates\":[{\"content\":{\"role\":\"model\","
+        "\"parts\":[{\"text\":\"Hello from Gemini!\"}]},"
+        "\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_GEMINI, json, strlen(json));
+
+    ASSERT_EQ(r.error, ADAM_OK);
+    ASSERT_NOT_NULL(r.content);
+    ASSERT_STR_EQ(r.content, "Hello from Gemini!");
+    ASSERT_EQ(r.tool_call_count, 0);
+    ASSERT_EQ(r.input_tokens, 10);
+    ASSERT_EQ(r.output_tokens, 5);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_gemini_tool_call) {
+    arena_t *a = arena_create(8192);
+    const char *json =
+        "{\"candidates\":[{\"content\":{\"role\":\"model\","
+        "\"parts\":[{\"text\":\"Let me search.\"},"
+        "{\"functionCall\":{\"name\":\"search\",\"args\":{\"q\":\"test\"}}}]},"
+        "\"finishReason\":\"FUNCTION_CALL\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":20,\"candidatesTokenCount\":10}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_GEMINI, json, strlen(json));
+
+    ASSERT_EQ(r.error, ADAM_OK);
+    ASSERT_NOT_NULL(r.content);
+    ASSERT(strstr(r.content, "search") != NULL);
+    ASSERT_EQ(r.tool_call_count, 1);
+    ASSERT_STR_EQ(r.tool_calls[0].name, "search");
+    ASSERT(strstr(r.tool_calls[0].arguments_json, "test") != NULL);
+    ASSERT_NOT_NULL(r.tool_calls[0].id); // generated ID
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_gemini_error) {
+    arena_t *a = arena_create(8192);
+    const char *json =
+        "{\"error\":{\"code\":400,\"message\":\"Invalid API key\","
+        "\"status\":\"INVALID_ARGUMENT\"}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_GEMINI, json, strlen(json));
+
+    ASSERT_NE(r.error, ADAM_OK);
+    ASSERT_NOT_NULL(r.error_msg);
+    ASSERT(strstr(r.error_msg, "Invalid API key") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_build_gemini_image_model) {
+    arena_t *a = arena_create(8192);
+    adam_message_t msg = {
+        .role = ADAM_ROLE_USER, .content = "Draw a cat", .content_len = 10
+    };
+
+    const char *json = adam_json_build_request(
+        a, ADAM_API_GEMINI, "gemini-3.1-flash-image-preview",
+        &msg, 1, NULL, 0, 0.7f, 4096, 1.0f, NULL);
+
+    ASSERT_NOT_NULL(json);
+    // Image model should have responseModalities with IMAGE
+    ASSERT(strstr(json, "\"responseModalities\"") != NULL);
+    ASSERT(strstr(json, "\"IMAGE\"") != NULL);
+    ASSERT(strstr(json, "\"TEXT\"") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(json_parse_gemini_image_response) {
+    arena_t *a = arena_create(16384);
+    // Simulate response with both text and inline image data
+    const char *json =
+        "{\"candidates\":[{\"content\":{\"role\":\"model\","
+        "\"parts\":[{\"text\":\"Here is your cat:\"},"
+        "{\"inline_data\":{\"mime_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}]},"
+        "\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2}}";
+
+    adam_llm_response_t r = adam_json_parse_response(
+        a, ADAM_API_GEMINI, json, strlen(json));
+
+    ASSERT_EQ(r.error, ADAM_OK);
+    ASSERT_NOT_NULL(r.content);
+    // Should contain the text
+    ASSERT(strstr(r.content, "Here is your cat:") != NULL);
+    // Should contain the embedded image as data URI
+    ASSERT(strstr(r.content, "![image](data:image/png;base64,") != NULL);
+    ASSERT(strstr(r.content, "iVBORw0KGgo=") != NULL);
+
+    arena_destroy(a);
+}
+
+TEST(model_registry_gemini) {
+    int cw = adam_model_context_window("gemini-2.0-flash");
+    ASSERT_EQ(cw, 1048576);
+
+    cw = adam_model_context_window("gemini-2.5-pro-latest");
+    ASSERT_EQ(cw, 1048576);
+
+    cw = adam_model_context_window("gemini-1.5-pro-002");
+    ASSERT_EQ(cw, 2097152);
+}
+
 TEST(json_parse_anthropic_text) {
     arena_t *a = arena_create(8192);
     const char *json =
@@ -4098,6 +4264,771 @@ TEST(cache_null_disabled) {
 }
 
 // ============================================================================
+// MARK: - Integration Tests (real-world scenarios)
+// ============================================================================
+
+// --- Mock that behaves like a real assistant: answers questions,
+//     calls tools when needed, uses tool results in final answer ---
+
+typedef struct {
+    int call_count;
+    int want_tool_on_call;       // which call# should request a tool (0=never)
+    const char *tool_name;       // which tool to call
+    const char *tool_args;       // args to send
+    const char *final_answer;    // answer after tool result
+} scenario_llm_ctx_t;
+
+static adam_llm_response_t scenario_llm(
+    void *ctx, arena_t *arena,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
+) {
+    scenario_llm_ctx_t *m = (scenario_llm_ctx_t *)ctx;
+    m->call_count++;
+    UNUSED_PARAM(tools); UNUSED_PARAM(tool_count);
+
+    adam_llm_response_t resp = {0};
+    resp.input_tokens = 100;
+    resp.output_tokens = 50;
+
+    // Check if there's a tool result in history
+    int has_tool_result = 0;
+    for (size_t i = 0; i < msg_count; i++)
+        if (msgs[i].role == ADAM_ROLE_TOOL) has_tool_result = 1;
+
+    if (m->want_tool_on_call == m->call_count && !has_tool_result
+        && m->tool_name && tool_count > 0) {
+        // Request a tool call
+        resp.tool_calls = arena_alloc(arena, sizeof(adam_tool_call_t));
+        resp.tool_call_count = 1;
+        resp.tool_calls[0].id = arena_strdup(arena, "call_scenario");
+        resp.tool_calls[0].name = arena_strdup(arena, m->tool_name);
+        resp.tool_calls[0].arguments_json = arena_strdup(arena,
+            m->tool_args ? m->tool_args : "{}");
+        resp.content = arena_strdup(arena, "Let me look that up.");
+    } else {
+        resp.content = arena_strdup(arena,
+            m->final_answer ? m->final_answer : "Done.");
+    }
+    return resp;
+}
+
+// ---- Scenario 1: Multi-turn conversation with session save/load ----
+
+#ifndef ADAM_NO_SQLITE
+
+TEST(integration_session_multi_turn) {
+    // Simulate: 3-turn conversation, save, reload, continue
+    mock_llm_ctx_t mock = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+
+    adam_memory_t *mem = adam_memory_open(":memory:");
+    ASSERT_NOT_NULL(mem);
+    s->memory = mem;
+
+    // Create session
+    char sid[37];
+    ASSERT_EQ(adam_session_create(mem, sid, sizeof(sid)), ADAM_OK);
+    s->session_id = sid;
+    s->auto_save = 1;
+
+    adam_history_t *h = adam_history_create();
+
+    // Turn 1
+    mock.fixed_response = "Hello! How can I help?";
+    adam_run_result_t r1 = adam_run(s, h, "Hi there");
+    ASSERT_EQ(r1.status, ADAM_OK);
+    ASSERT_STR_EQ(r1.final_response, "Hello! How can I help?");
+    adam_run_result_free(&r1);
+
+    // Turn 2
+    mock.fixed_response = "Your name is Marco.";
+    adam_run_result_t r2 = adam_run(s, h, "My name is Marco");
+    ASSERT_EQ(r2.status, ADAM_OK);
+    adam_run_result_free(&r2);
+
+    // Turn 3
+    mock.fixed_response = "You told me your name is Marco.";
+    adam_run_result_t r3 = adam_run(s, h, "What is my name?");
+    ASSERT_EQ(r3.status, ADAM_OK);
+    adam_run_result_free(&r3);
+
+    // History should have: system + 3*(user + assistant) = 7
+    ASSERT_EQ(adam_history_count(h), 7);
+    adam_history_destroy(h);
+
+    // Reload session into fresh history
+    adam_history_t *h2 = adam_history_create();
+    ASSERT_EQ(adam_session_load(mem, sid, h2), ADAM_OK);
+    ASSERT_EQ(adam_history_count(h2), 7);
+
+    // Verify message content survived round-trip.
+    // Note: system message is loaded as user (gets rebuilt by next adam_run).
+    // So items[0] is the old system prompt loaded as user, items[1] is "Hi there"
+    ASSERT_EQ(h2->items[1].role, ADAM_ROLE_USER);
+    ASSERT(strstr(h2->items[1].content, "Hi there") != NULL);
+    ASSERT_EQ(h2->items[2].role, ADAM_ROLE_ASSISTANT);
+    ASSERT(strstr(h2->items[2].content, "Hello") != NULL);
+    ASSERT_EQ(h2->items[5].role, ADAM_ROLE_USER);
+    ASSERT(strstr(h2->items[5].content, "What is my name") != NULL);
+
+    // Continue conversation from loaded session
+    mock.fixed_response = "Continuing from saved session.";
+    size_t count_before = adam_history_count(h2);
+    adam_run_result_t r4 = adam_run(s, h2, "Continue please");
+    ASSERT_EQ(r4.status, ADAM_OK);
+    // adam_run adds: system message (if missing) + user + assistant
+    // loaded history had system as user, so adam_run prepends new system (+1)
+    // then appends user (+1) and assistant (+1) = count_before + 3
+    ASSERT(adam_history_count(h2) >= count_before + 2); // at least user + assistant
+    ASSERT_STR_EQ(r4.final_response, "Continuing from saved session.");
+    adam_run_result_free(&r4);
+
+    adam_history_destroy(h2);
+    adam_settings_destroy(s);
+    adam_memory_close(mem);
+}
+
+// ---- Scenario 2: Tool call with session persistence ----
+
+TEST(integration_tool_call_session_roundtrip) {
+    // Agent calls a tool, then the entire conversation (including tool call
+    // and tool result) is saved and loaded correctly.
+    scenario_llm_ctx_t mock = {
+        .want_tool_on_call = 1,
+        .tool_name = "search",
+        .tool_args = "{\"query\":\"test\"}",
+        .final_answer = "Based on search: the answer is 42."
+    };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, scenario_llm, &mock);
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "search", .execute = mock_tool_search });
+
+    adam_memory_t *mem = adam_memory_open(":memory:");
+    s->memory = mem;
+    char sid[37];
+    adam_session_create(mem, sid, sizeof(sid));
+    s->session_id = sid;
+    s->auto_save = 1;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Find the answer");
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_STR_EQ(r.final_response, "Based on search: the answer is 42.");
+    ASSERT_EQ(mock.call_count, 2); // tool call + final answer
+
+    // History: system + user + assistant(tool_call) + tool_result + assistant(final) = 5
+    ASSERT_EQ(adam_history_count(h), 5);
+    ASSERT_EQ(h->items[2].tool_call_count, 1);
+    ASSERT_STR_EQ(h->items[2].tool_calls[0].name, "search");
+    ASSERT_EQ(h->items[3].role, ADAM_ROLE_TOOL);
+    adam_run_result_free(&r);
+
+    // Load into fresh history and verify tool calls survived
+    adam_history_t *h2 = adam_history_create();
+    ASSERT_EQ(adam_session_load(mem, sid, h2), ADAM_OK);
+    ASSERT_EQ(adam_history_count(h2), 5);
+    ASSERT_EQ(h2->items[2].tool_call_count, 1);
+    ASSERT_STR_EQ(h2->items[2].tool_calls[0].name, "search");
+    ASSERT_STR_EQ(h2->items[2].tool_calls[0].id, "call_scenario");
+    ASSERT_EQ(h2->items[3].role, ADAM_ROLE_TOOL);
+    ASSERT_STR_EQ(h2->items[3].tool_call_id, "call_scenario");
+    ASSERT(strstr(h2->items[3].content, "42 matches") != NULL);
+
+    adam_history_destroy(h);
+    adam_history_destroy(h2);
+    adam_settings_destroy(s);
+    adam_memory_close(mem);
+}
+
+#endif // ADAM_NO_SQLITE
+
+// ---- Scenario 3: Evolution with tool-using agent ----
+
+TEST(integration_evolve_with_tools) {
+    // Evolution loop where the agent has tools. Each attempt can use tools.
+    // The eval function scores based on whether tool was used.
+    mock_llm_ctx_t mock = {0};
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_with_tool, &mock);
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "search", .execute = mock_tool_search });
+
+    // Eval: score increases each iteration
+    int eval_calls = 0;
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "Find information using the search tool.";
+    cfg.eval_fn = eval_improving;
+    cfg.eval_ctx = &eval_calls;
+    cfg.max_iterations = 3;
+    cfg.target_score = 999; // won't reach
+    cfg.plateau_iters = 999;
+
+    adam_evolve_result_t r = adam_evolve(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.stop_reason, ADAM_EVOLVE_STOP_MAX_ITERS);
+    ASSERT_EQ(r.attempt_total, 3);
+    ASSERT_EQ(eval_calls, 3);
+    // Each attempt used the tool (mock_llm_with_tool calls tool then answers)
+    ASSERT(mock.call_count >= 6); // 2 calls per attempt * 3 + refine/insight calls
+    ASSERT_NOT_NULL(r.best_output);
+    ASSERT_NOT_NULL(r.strategy);
+    ASSERT_NOT_NULL(r.insights);
+
+    adam_evolve_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+// ---- Scenario 4: Research with findings accumulation ----
+
+TEST(integration_research_accumulates_findings) {
+    // Research mode: 3 iterations, each adds findings, final report synthesized
+    mock_research_ctx_t mock = { .include_complete = 0 };
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_research_report, &mock);
+
+    adam_research_config_t cfg = adam_research_config_defaults();
+    cfg.question = "How does photosynthesis work?";
+    cfg.instructions = "Focus on the light-dependent reactions.";
+    cfg.max_iterations = 3;
+
+    adam_research_result_t r = adam_research(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.stop_reason, ADAM_RESEARCH_STOP_MAX_ITERS);
+    ASSERT_EQ(r.total_iterations, 3);
+
+    // Each iteration should have added at least 1 finding
+    ASSERT(r.finding_count >= 3);
+
+    // Findings should have iteration tracking
+    ASSERT_EQ(r.findings[0].iteration, 0);
+
+    // Report should be synthesized
+    ASSERT_NOT_NULL(r.report);
+    ASSERT(strstr(r.report, "Research Report") != NULL);
+
+    // Stats accumulated across iterations
+    ASSERT(r.total_input_tokens > 0);
+    ASSERT(r.elapsed_ms >= 0.0);
+
+    adam_research_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+// ---- Scenario 5: Multi-agent delegation chain ----
+
+TEST(integration_multi_agent_chain) {
+    // Main agent delegates to sub-agent, which has its own tools and identity.
+    // Sub-agent uses a tool, gets result, returns to main agent.
+
+    // Sub-agent: has a calculator tool
+    mock_llm_ctx_t sub_mock = { .fixed_response = "The result is 1024." };
+    adam_settings_t *sub_s = adam_create_settings();
+    adam_settings_set_llm_callback(sub_s, mock_llm_simple, &sub_mock);
+    adam_settings_set_identity(sub_s, "You are a math assistant.");
+
+    adam_agent_tool_ctx_t sub_ctx = { .settings = sub_s, .history = NULL };
+
+    // Main agent: delegates math to sub-agent
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_agent_caller, &(mock_llm_ctx_t){0});
+    adam_settings_set_identity(s, "You are a general assistant.");
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "ask_math",
+        .description = "Ask the math assistant",
+        .parameters_json = "{\"type\":\"object\",\"properties\":"
+                           "{\"message\":{\"type\":\"string\"}},"
+                           "\"required\":[\"message\"]}",
+        .execute = adam_tool_agent,
+        .ctx = &sub_ctx,
+    });
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "What is 2^10?");
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    // Sub-agent was called
+    ASSERT_EQ(sub_mock.call_count, 1);
+    // Main agent got sub-agent's response as tool result
+    ASSERT_EQ(adam_history_count(h), 5); // sys + user + asst(tool) + tool_result + asst(final)
+    // Tool result should contain sub-agent's answer
+    ASSERT(strstr(h->items[3].content, "1024") != NULL);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+    adam_settings_destroy(sub_s);
+}
+
+// ---- Scenario 6: Cache prevents redundant LLM calls ----
+
+TEST(integration_cache_across_sessions) {
+    // Two independent conversations with same message get cache hit
+    mock_llm_ctx_t mock = { .fixed_response = "Paris is the capital." };
+    adam_cache_t *cache = adam_cache_create(32);
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->cache = cache;
+
+    // First conversation
+    adam_history_t *h1 = adam_history_create();
+    adam_run_result_t r1 = adam_run(s, h1, "What is the capital of France?");
+    ASSERT_EQ(r1.status, ADAM_OK);
+    ASSERT_STR_EQ(r1.final_response, "Paris is the capital.");
+    ASSERT_EQ(mock.call_count, 1);
+    adam_run_result_free(&r1);
+    adam_history_destroy(h1);
+
+    // Second conversation — same question, different history object
+    adam_history_t *h2 = adam_history_create();
+    adam_run_result_t r2 = adam_run(s, h2, "What is the capital of France?");
+    ASSERT_EQ(r2.status, ADAM_OK);
+    ASSERT_STR_EQ(r2.final_response, "Paris is the capital.");
+    ASSERT_EQ(mock.call_count, 1); // NOT called again — cache hit
+    ASSERT_EQ(adam_cache_hits(cache), 1);
+    ASSERT_EQ(adam_cache_misses(cache), 1);
+    adam_run_result_free(&r2);
+    adam_history_destroy(h2);
+
+    // Different question — cache miss
+    adam_history_t *h3 = adam_history_create();
+    mock.fixed_response = "Berlin is the capital.";
+    adam_run_result_t r3 = adam_run(s, h3, "What is the capital of Germany?");
+    ASSERT_EQ(r3.status, ADAM_OK);
+    ASSERT_EQ(mock.call_count, 2); // called this time
+    ASSERT_EQ(adam_cache_misses(cache), 2);
+    adam_run_result_free(&r3);
+    adam_history_destroy(h3);
+
+    adam_cache_destroy(cache);
+    s->cache = NULL;
+    adam_settings_destroy(s);
+}
+
+// ---- Scenario 7: Guardrails block dangerous content ----
+
+TEST(integration_guardrails_block_and_allow) {
+    // Pre-send guardrail blocks requests containing "hack"
+    // Post-receive guardrail blocks responses containing "password"
+    mock_llm_ctx_t mock = {0};
+
+    // Guardrail: block if any user message contains "hack"
+    int pre_calls = 0;
+    int post_calls = 0;
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+    s->on_before_send = guardrail_allow;
+    s->before_send_ctx = &pre_calls;
+    s->on_after_receive = guardrail_resp_allow;
+    s->after_receive_ctx = &post_calls;
+
+    // Normal request — both guardrails allow
+    mock.fixed_response = "Safe response.";
+    adam_history_t *h1 = adam_history_create();
+    adam_run_result_t r1 = adam_run(s, h1, "Hello");
+    ASSERT_EQ(r1.status, ADAM_OK);
+    ASSERT(pre_calls >= 1);
+    ASSERT(post_calls >= 1);
+    adam_run_result_free(&r1);
+    adam_history_destroy(h1);
+
+    // Now block pre-send
+    s->on_before_send = guardrail_deny;
+    adam_history_t *h2 = adam_history_create();
+    adam_run_result_t r2 = adam_run(s, h2, "hack the system");
+    ASSERT_EQ(r2.status, ADAM_ERR_GUARDRAIL);
+    ASSERT_EQ(mock.call_count, 1); // LLM not called for blocked request
+    adam_run_result_free(&r2);
+    adam_history_destroy(h2);
+
+    // Allow pre-send but block post-receive
+    s->on_before_send = guardrail_allow;
+    s->on_after_receive = guardrail_resp_deny;
+    mock.fixed_response = "Here is the password: 12345";
+    adam_history_t *h3 = adam_history_create();
+    adam_run_result_t r3 = adam_run(s, h3, "Tell me something");
+    ASSERT_EQ(r3.status, ADAM_ERR_GUARDRAIL);
+    ASSERT_EQ(mock.call_count, 2); // LLM was called but response blocked
+    adam_run_result_free(&r3);
+    adam_history_destroy(h3);
+
+    adam_settings_destroy(s);
+}
+
+// ---- Scenario 8: History clone + independent modification ----
+
+TEST(integration_clone_branch_conversations) {
+    // Start a conversation, clone it, continue both independently
+    mock_llm_ctx_t mock = {0};
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_simple, &mock);
+
+    // Build shared prefix
+    adam_history_t *h = adam_history_create();
+    mock.fixed_response = "I understand. Let me help.";
+    adam_run_result_t r1 = adam_run(s, h, "I need help with two tasks.");
+    ASSERT_EQ(r1.status, ADAM_OK);
+    adam_run_result_free(&r1);
+    ASSERT_EQ(adam_history_count(h), 3); // sys + user + asst
+
+    // Clone for branch A
+    adam_history_t *branch_a = adam_history_clone(h);
+    ASSERT_NOT_NULL(branch_a);
+    ASSERT_EQ(adam_history_count(branch_a), 3);
+
+    // Clone for branch B
+    adam_history_t *branch_b = adam_history_clone(h);
+    ASSERT_NOT_NULL(branch_b);
+
+    // Continue branch A
+    mock.fixed_response = "Branch A result.";
+    adam_run_result_t ra = adam_run(s, branch_a, "Task A: write code");
+    ASSERT_EQ(ra.status, ADAM_OK);
+    ASSERT_STR_EQ(ra.final_response, "Branch A result.");
+    ASSERT_EQ(adam_history_count(branch_a), 5);
+    adam_run_result_free(&ra);
+
+    // Continue branch B differently
+    mock.fixed_response = "Branch B result.";
+    adam_run_result_t rb = adam_run(s, branch_b, "Task B: write tests");
+    ASSERT_EQ(rb.status, ADAM_OK);
+    ASSERT_STR_EQ(rb.final_response, "Branch B result.");
+    ASSERT_EQ(adam_history_count(branch_b), 5);
+    adam_run_result_free(&rb);
+
+    // Original unchanged
+    ASSERT_EQ(adam_history_count(h), 3);
+
+    // Branch A has "Task A", branch B has "Task B"
+    ASSERT(strstr(branch_a->items[3].content, "Task A") != NULL);
+    ASSERT(strstr(branch_b->items[3].content, "Task B") != NULL);
+
+    adam_history_destroy(h);
+    adam_history_destroy(branch_a);
+    adam_history_destroy(branch_b);
+    adam_settings_destroy(s);
+}
+
+// ---- Scenario 9: Evolution converges to target score ----
+
+TEST(integration_evolve_converges) {
+    // Eval returns progressively better scores: 10, 30, 50, 70, 90, 100
+    // Target is 95, so should stop at iteration 4 (score=90) or 5 (score=100)
+    mock_evolve_ctx_t mock = {0};
+    int eval_calls = 0;
+
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_evolve, &mock);
+
+    // Custom eval: 10 + iteration * 20
+    adam_evolve_config_t cfg = adam_evolve_config_defaults();
+    cfg.task = "Write a perfect essay.";
+    cfg.initial_strategy = "Start with an outline.";
+    cfg.metrics = "Clarity, structure, and persuasiveness.";
+    cfg.eval_fn = eval_improving; // 20, 40, 60, 80, 100
+    cfg.eval_ctx = &eval_calls;
+    cfg.target_score = 95;
+    cfg.max_iterations = 20;
+
+    adam_evolve_result_t r = adam_evolve(s, &cfg);
+
+    ASSERT_EQ(r.status, ADAM_OK);
+    ASSERT_EQ(r.stop_reason, ADAM_EVOLVE_STOP_SCORE);
+    ASSERT_EQ(r.best_score, 100); // 20+4*20=100 >= 95
+    ASSERT_EQ(r.attempt_total, 5);
+
+    // Strategy was refined (improved multiple times)
+    ASSERT(strstr(r.strategy, "Refined") != NULL);
+    // Insights accumulated
+    ASSERT(strstr(r.insights, "Insight") != NULL);
+    // Best output captured
+    ASSERT_NOT_NULL(r.best_output);
+
+    adam_evolve_result_free(&r);
+    adam_settings_destroy(s);
+}
+
+// ---- Scenario 10: Timeout stops long-running tool loop ----
+
+TEST(integration_timeout_with_tools) {
+    // Agent keeps calling tools forever, timeout stops it
+    mock_llm_ctx_t mock = {0};
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_infinite_tools, &mock);
+    adam_settings_add_tool(s, (adam_tool_def_t){
+        .name = "search", .execute = mock_tool_search });
+    s->timeout_ms = 5; // very short timeout
+    s->max_iterations = 100000;
+
+    adam_history_t *h = adam_history_create();
+    adam_run_result_t r = adam_run(s, h, "Search forever");
+
+    // Should have stopped due to timeout
+    ASSERT(r.status == ADAM_ERR_TIMEOUT || r.status == ADAM_ERR_MAX_ITERATIONS);
+    ASSERT(r.total_iterations < 100000);
+    ASSERT(r.elapsed_ms >= 0.0);
+
+    adam_run_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+// ---- Scenario 11: Thread pool with multiple agents ----
+
+#ifndef ADAM_NO_PTHREADS
+
+static pthread_mutex_t g_integ_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int g_integ_done = 0;
+static adam_run_result_t g_integ_results[8];
+
+static void integ_pool_done(void *ctx, adam_run_result_t result) {
+    int idx = *(int *)ctx;
+    pthread_mutex_lock(&g_integ_mutex);
+    g_integ_results[idx] = result;
+    g_integ_done++;
+    pthread_mutex_unlock(&g_integ_mutex);
+}
+
+TEST(integration_thread_pool_concurrent) {
+    // 4 agents run concurrently with different responses
+    g_integ_done = 0;
+    const char *responses[] = {"Alpha", "Beta", "Gamma", "Delta"};
+    mock_llm_ctx_t mocks[4];
+    adam_settings_t *settings[4];
+    adam_history_t *histories[4];
+    int indices[4];
+
+    adam_pool_t *pool = adam_pool_create(2); // 2 workers
+    ASSERT_NOT_NULL(pool);
+
+    for (int i = 0; i < 4; i++) {
+        memset(&mocks[i], 0, sizeof(mock_llm_ctx_t));
+        mocks[i].fixed_response = responses[i];
+
+        settings[i] = adam_create_settings();
+        adam_settings_set_llm_callback(settings[i], mock_llm_simple, &mocks[i]);
+        histories[i] = adam_history_create();
+        indices[i] = i;
+
+        adam_pool_submit(pool, (adam_job_t){
+            .settings = settings[i],
+            .history = histories[i],
+            .user_message = "What's your name?",
+            .on_done = integ_pool_done,
+            .on_done_ctx = &indices[i],
+        });
+    }
+
+    adam_pool_destroy(pool); // waits for all
+
+    ASSERT_EQ(g_integ_done, 4);
+    for (int i = 0; i < 4; i++) {
+        ASSERT_EQ(g_integ_results[i].status, ADAM_OK);
+        ASSERT_NOT_NULL(g_integ_results[i].final_response);
+        // Each agent got its own response
+        ASSERT_STR_EQ(g_integ_results[i].final_response, responses[i]);
+        adam_run_result_free(&g_integ_results[i]);
+        adam_history_destroy(histories[i]);
+        adam_settings_destroy(settings[i]);
+    }
+}
+
+#endif // ADAM_NO_PTHREADS
+
+// ---- Scenario 12: JSON output with tool-using agent ----
+
+TEST(integration_json_output) {
+    // adam_run_json returns valid JSON, adam_json_extract works
+    mock_llm_ctx_t mock = {0};
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_set_llm_callback(s, mock_llm_json, &mock);
+
+    adam_history_t *h = adam_history_create();
+    adam_json_result_t r = adam_run_json(s, h,
+        "List programming languages as JSON",
+        "{\"languages\":[{\"name\":\"...\"}]}", 3);
+
+    ASSERT_EQ(r.base.status, ADAM_OK);
+    ASSERT_EQ(r.json_valid, 1);
+    ASSERT_NOT_NULL(r.base.final_response);
+
+    // Extract a key
+    char *answer = adam_json_extract(r.base.final_response, "answer");
+    ASSERT_NOT_NULL(answer);
+    ASSERT_STR_EQ(answer, "42");
+    free(answer);
+
+    char *name = adam_json_extract(r.base.final_response, "name");
+    ASSERT_NOT_NULL(name);
+    ASSERT_STR_EQ(name, "Adam");
+    free(name);
+
+    adam_json_result_free(&r);
+    adam_history_destroy(h);
+    adam_settings_destroy(s);
+}
+
+// ---- Scenario 13: File tools with sandbox enforcement ----
+
+TEST(integration_file_tools_sandbox) {
+    // Write a file, read it back, list directory — all sandboxed
+    adam_settings_t *s = adam_create_settings();
+    adam_settings_allow_dir(s, "/tmp");
+    arena_t *a = arena_create(64 * 1024);
+
+    // Write
+    const char *w_args = "{\"path\":\"/tmp/adam_integ_test.txt\","
+                         "\"content\":\"Hello from integration test!\"}";
+    adam_tool_result_t wr = adam_tool_file_write(a, s, w_args, strlen(w_args));
+    ASSERT_EQ(wr.success, 1);
+
+    // Read back
+    arena_reset(a);
+    const char *r_args = "{\"path\":\"/tmp/adam_integ_test.txt\"}";
+    adam_tool_result_t rr = adam_tool_file_read(a, s, r_args, strlen(r_args));
+    ASSERT_EQ(rr.success, 1);
+    ASSERT_STR_EQ(rr.for_llm, "Hello from integration test!");
+
+    // List directory containing the file
+    arena_reset(a);
+    const char *l_args = "{\"path\":\"/tmp\"}";
+    adam_tool_result_t lr = adam_tool_list_directory(a, s, l_args, strlen(l_args));
+    ASSERT_EQ(lr.success, 1);
+    ASSERT(strstr(lr.for_llm, "adam_integ_test.txt") != NULL);
+
+    // Denied outside sandbox
+    arena_reset(a);
+    const char *d_args = "{\"path\":\"/etc/passwd\"}";
+    adam_tool_result_t dr = adam_tool_file_read(a, s, d_args, strlen(d_args));
+    ASSERT_EQ(dr.success, 0);
+    ASSERT(strstr(dr.for_llm, "denied") != NULL);
+
+    remove("/tmp/adam_integ_test.txt");
+    arena_destroy(a);
+    adam_settings_destroy(s);
+}
+
+// ---- Scenario 14: Calculator tool precision ----
+
+TEST(integration_calculator_expressions) {
+    arena_t *a = arena_create(4096);
+
+    // Basic arithmetic
+    const char *a1 = "{\"expression\":\"(3 + 4) * 2 - 1\"}";
+    adam_tool_result_t r1 = adam_tool_calculator(a, NULL, a1, strlen(a1));
+    ASSERT_EQ(r1.success, 1);
+    ASSERT_STR_EQ(r1.for_llm, "13");
+
+    // Exponentiation
+    arena_reset(a);
+    const char *a2 = "{\"expression\":\"2 ^ 16\"}";
+    adam_tool_result_t r2 = adam_tool_calculator(a, NULL, a2, strlen(a2));
+    ASSERT_EQ(r2.success, 1);
+    ASSERT_STR_EQ(r2.for_llm, "65536");
+
+    // Floating point
+    arena_reset(a);
+    const char *a3 = "{\"expression\":\"22 / 7\"}";
+    adam_tool_result_t r3 = adam_tool_calculator(a, NULL, a3, strlen(a3));
+    ASSERT_EQ(r3.success, 1);
+    ASSERT(strstr(r3.for_llm, "3.14") != NULL);
+
+    // Nested parentheses
+    arena_reset(a);
+    const char *a4 = "{\"expression\":\"((1 + 2) * (3 + 4)) ^ 2\"}";
+    adam_tool_result_t r4 = adam_tool_calculator(a, NULL, a4, strlen(a4));
+    ASSERT_EQ(r4.success, 1);
+    ASSERT_STR_EQ(r4.for_llm, "441"); // (3*7)^2 = 21^2 = 441
+
+    // Modulo
+    arena_reset(a);
+    const char *a5 = "{\"expression\":\"17 % 5\"}";
+    adam_tool_result_t r5 = adam_tool_calculator(a, NULL, a5, strlen(a5));
+    ASSERT_EQ(r5.success, 1);
+    ASSERT_STR_EQ(r5.for_llm, "2");
+
+    // Negative numbers
+    arena_reset(a);
+    const char *a6 = "{\"expression\":\"-3 * -4\"}";
+    adam_tool_result_t r6 = adam_tool_calculator(a, NULL, a6, strlen(a6));
+    ASSERT_EQ(r6.success, 1);
+    ASSERT_STR_EQ(r6.for_llm, "12");
+
+    arena_destroy(a);
+}
+
+#ifndef ADAM_NO_SQLITE
+
+// ---- Scenario 15: SQL tool queries ----
+
+TEST(integration_sql_tool_crud) {
+    adam_memory_t *mem = adam_memory_open(":memory:");
+    ASSERT_NOT_NULL(mem);
+    arena_t *a = arena_create(64 * 1024);
+
+    // Create table
+    const char *c = "{\"sql\":\"CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT, age INTEGER)\"}";
+    adam_tool_result_t rc = adam_tool_sql_query(a, mem, c, strlen(c));
+    ASSERT_EQ(rc.success, 1);
+
+    // Insert rows
+    arena_reset(a);
+    const char *i1 = "{\"sql\":\"INSERT INTO users VALUES(1, 'Alice', 30)\"}";
+    adam_tool_result_t ri1 = adam_tool_sql_query(a, mem, i1, strlen(i1));
+    ASSERT_EQ(ri1.success, 1);
+    ASSERT(strstr(ri1.for_llm, "1 rows affected") != NULL);
+
+    arena_reset(a);
+    const char *i2 = "{\"sql\":\"INSERT INTO users VALUES(2, 'Bob', 25)\"}";
+    adam_tool_result_t ri2 = adam_tool_sql_query(a, mem, i2, strlen(i2));
+    ASSERT_EQ(ri2.success, 1);
+
+    arena_reset(a);
+    const char *i3 = "{\"sql\":\"INSERT INTO users VALUES(3, 'Charlie', 35)\"}";
+    adam_tool_result_t ri3 = adam_tool_sql_query(a, mem, i3, strlen(i3));
+    ASSERT_EQ(ri3.success, 1);
+
+    // SELECT with results
+    arena_reset(a);
+    const char *q = "{\"sql\":\"SELECT name, age FROM users WHERE age > 27 ORDER BY name\"}";
+    adam_tool_result_t rq = adam_tool_sql_query(a, mem, q, strlen(q));
+    ASSERT_EQ(rq.success, 1);
+    ASSERT(strstr(rq.for_llm, "Alice") != NULL);
+    ASSERT(strstr(rq.for_llm, "Charlie") != NULL);
+    // Bob (age 25) should not appear
+    ASSERT(strstr(rq.for_llm, "Bob") == NULL);
+
+    // UPDATE
+    arena_reset(a);
+    const char *u = "{\"sql\":\"UPDATE users SET age = 31 WHERE name = 'Alice'\"}";
+    adam_tool_result_t ru = adam_tool_sql_query(a, mem, u, strlen(u));
+    ASSERT_EQ(ru.success, 1);
+    ASSERT(strstr(ru.for_llm, "1 rows affected") != NULL);
+
+    // Block DROP
+    arena_reset(a);
+    const char *d = "{\"sql\":\"DROP TABLE users\"}";
+    adam_tool_result_t rd = adam_tool_sql_query(a, mem, d, strlen(d));
+    ASSERT_EQ(rd.success, 0);
+    ASSERT(strstr(rd.for_llm, "destructive") != NULL);
+
+    arena_destroy(a);
+    adam_memory_close(mem);
+}
+
+#endif // ADAM_NO_SQLITE
+
+// ============================================================================
 // MARK: - Performance Benchmarks
 // ============================================================================
 
@@ -4250,6 +5181,14 @@ int main(void) {
     RUN(json_build_tool_call_messages);
     RUN(json_build_escaping);
     RUN(json_build_json_mode);
+    RUN(json_build_gemini_simple);
+    RUN(json_build_gemini_with_tools);
+    RUN(json_parse_gemini_text);
+    RUN(json_parse_gemini_tool_call);
+    RUN(json_parse_gemini_error);
+    RUN(json_build_gemini_image_model);
+    RUN(json_parse_gemini_image_response);
+    RUN(model_registry_gemini);
     RUN(json_parse_anthropic_text);
     RUN(json_parse_anthropic_tool_use);
     RUN(json_parse_anthropic_error);
@@ -4400,6 +5339,30 @@ int main(void) {
     RUN(cache_lru_eviction);
     RUN(cache_clear);
     RUN(cache_null_disabled);
+
+    // --- Integration Tests ---
+    printf("\nIntegration Tests:\n");
+#ifndef ADAM_NO_SQLITE
+    RUN(integration_session_multi_turn);
+    RUN(integration_tool_call_session_roundtrip);
+#endif
+    RUN(integration_evolve_with_tools);
+    RUN(integration_research_accumulates_findings);
+    RUN(integration_multi_agent_chain);
+    RUN(integration_cache_across_sessions);
+    RUN(integration_guardrails_block_and_allow);
+    RUN(integration_clone_branch_conversations);
+    RUN(integration_evolve_converges);
+    RUN(integration_timeout_with_tools);
+#ifndef ADAM_NO_PTHREADS
+    RUN(integration_thread_pool_concurrent);
+#endif
+    RUN(integration_json_output);
+    RUN(integration_file_tools_sandbox);
+    RUN(integration_calculator_expressions);
+#ifndef ADAM_NO_SQLITE
+    RUN(integration_sql_tool_crud);
+#endif
 
     // --- Performance ---
     printf("\nPerformance:\n");

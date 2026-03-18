@@ -225,6 +225,12 @@ static const char *sandbox_check(arena_t *arena, const adam_settings_t *s,
             return NULL;
         }
 
+        // Check combined length fits in PATH_MAX
+        if (strlen(parent_resolved) + 1 + strlen(basename) >= PATH_MAX) {
+            free(path_copy);
+            return NULL;
+        }
+
         snprintf(resolved, sizeof(resolved), "%s" ADAM_PATH_SEP_STR "%s",
                  parent_resolved, basename);
         free(path_copy);
@@ -1033,7 +1039,7 @@ adam_tool_result_t adam_tool_sql_query(arena_t *arena, void *ctx,
         pos += (size_t)snprintf(buf + pos, buf_size - pos,
             "%s%s", c > 0 ? "\t" : "", name ? name : "?");
     }
-    if (ncol > 0) buf[pos++] = '\n';
+    if (ncol > 0 && pos < buf_size - 1) buf[pos++] = '\n';
 
     while (sqlite3_step(vm) == SQLITE_ROW && rows < 100) {
         for (int c = 0; c < ncol && pos < buf_size - 128; c++) {

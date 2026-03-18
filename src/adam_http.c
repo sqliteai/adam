@@ -49,10 +49,24 @@ adam_llm_response_t adam_llm_call_http(
 
     // Determine URL
     const char *url = s->base_url;
+    char *gemini_url = NULL;
     if (!url) {
-        url = (s->api_format == ADAM_API_ANTHROPIC)
-            ? "https://api.anthropic.com/v1/messages"
-            : "https://api.openai.com/v1/chat/completions";
+        if (s->api_format == ADAM_API_GEMINI) {
+            // Gemini: model in URL path, API key in query string
+            const char *model = s->model ? s->model : "gemini-2.0-flash";
+            size_t gurl_len = strlen(model) + (s->api_key ? strlen(s->api_key) : 0) + 128;
+            gemini_url = arena_alloc(arena, gurl_len);
+            if (gemini_url) {
+                snprintf(gemini_url, gurl_len,
+                    "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
+                    model, s->api_key ? s->api_key : "");
+                url = gemini_url;
+            }
+        } else if (s->api_format == ADAM_API_ANTHROPIC) {
+            url = "https://api.anthropic.com/v1/messages";
+        } else {
+            url = "https://api.openai.com/v1/chat/completions";
+        }
     }
 
     // Build auth header
@@ -74,6 +88,9 @@ adam_llm_response_t adam_llm_call_http(
     if (s->api_format == ADAM_API_ANTHROPIC) {
         snprintf(auth, auth_len, "x-api-key: %s", s->api_key);
         extra = anthropic_extra;
+    } else if (s->api_format == ADAM_API_GEMINI) {
+        // Gemini: no auth header (key is in URL query string)
+        auth[0] = '\0';
     } else {
         snprintf(auth, auth_len, "Authorization: Bearer %s", s->api_key);
     }

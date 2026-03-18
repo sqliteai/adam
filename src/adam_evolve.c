@@ -352,8 +352,8 @@ adam_evolve_result_t adam_evolve(adam_settings_t *settings,
                 adam_run_result_t ref = adam_run(settings, history, refine);
                 free(refine);
                 if (ref.status == ADAM_OK && ref.final_response) {
-                    free(strategy);
-                    strategy = strdup(ref.final_response);
+                    char *new_strat = strdup(ref.final_response);
+                    if (new_strat) { free(strategy); strategy = new_strat; }
                 }
                 accum_stats(&result, &ref);
                 adam_run_result_free(&ref);
@@ -370,8 +370,8 @@ adam_evolve_result_t adam_evolve(adam_settings_t *settings,
             adam_run_result_t ins = adam_run(settings, history, ins_prompt);
             free(ins_prompt);
             if (ins.status == ADAM_OK && ins.final_response) {
-                free(insights);
-                insights = strdup(ins.final_response);
+                char *new_ins = strdup(ins.final_response);
+                if (new_ins) { free(insights); insights = new_ins; }
             }
             accum_stats(&result, &ins);
             adam_run_result_free(&ins);

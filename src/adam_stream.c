@@ -136,9 +136,11 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
 
                     // Append to text buffer
                     if (ctx->text_len + tlen >= ctx->text_cap) {
-                        ctx->text_cap = (ctx->text_cap + tlen) * 2;
-                        char *nb = realloc(ctx->text_buf, ctx->text_cap);
-                        if (nb) ctx->text_buf = nb;
+                        size_t new_cap = (ctx->text_cap + tlen) * 2;
+                        char *nb = realloc(ctx->text_buf, new_cap);
+                        if (!nb) continue; // skip on OOM
+                        ctx->text_buf = nb;
+                        ctx->text_cap = new_cap;
                     }
                     memcpy(ctx->text_buf + ctx->text_len, text, tlen);
                     ctx->text_len += tlen;
@@ -157,9 +159,11 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                         const char *pj = data + tokens[i+1].start;
                         size_t idx = (size_t)ctx->tc_current;
                         if (ctx->tool_calls[idx].args_len + plen >= ctx->tool_calls[idx].args_cap) {
-                            ctx->tool_calls[idx].args_cap = (ctx->tool_calls[idx].args_cap + plen) * 2;
-                            char *nb = realloc(ctx->tool_calls[idx].args, ctx->tool_calls[idx].args_cap);
-                            if (nb) ctx->tool_calls[idx].args = nb;
+                            size_t new_cap = (ctx->tool_calls[idx].args_cap + plen) * 2;
+                            char *nb = realloc(ctx->tool_calls[idx].args, new_cap);
+                            if (!nb) continue; // skip on OOM
+                            ctx->tool_calls[idx].args = nb;
+                            ctx->tool_calls[idx].args_cap = new_cap;
                         }
                         memcpy(ctx->tool_calls[idx].args + ctx->tool_calls[idx].args_len, pj, plen);
                         ctx->tool_calls[idx].args_len += plen;
@@ -189,12 +193,18 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                     }
                     if (block_type && strcmp(block_type, "tool_use") == 0
                         && tc_name && ctx->tc_count < MAX_TOOL_CALLS) {
-                        size_t idx = ctx->tc_count++;
-                        ctx->tool_calls[idx].id = tc_id ? strdup(tc_id) : NULL;
-                        ctx->tool_calls[idx].name = strdup(tc_name);
-                        ctx->tool_calls[idx].args = calloc(1, 256);
-                        ctx->tool_calls[idx].args_cap = 256;
-                        ctx->tc_current = (int)idx;
+                        char *dup_name = strdup(tc_name);
+                        char *dup_args = calloc(1, 256);
+                        if (!dup_name || !dup_args) {
+                            free(dup_name); free(dup_args);
+                        } else {
+                            size_t idx = ctx->tc_count++;
+                            ctx->tool_calls[idx].id = tc_id ? strdup(tc_id) : NULL;
+                            ctx->tool_calls[idx].name = dup_name;
+                            ctx->tool_calls[idx].args = dup_args;
+                            ctx->tool_calls[idx].args_cap = 256;
+                            ctx->tc_current = (int)idx;
+                        }
                     }
                     break;
                 }
@@ -244,9 +254,11 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                 const char *text = data + tokens[i+1].start;
 
                 if (ctx->text_len + tlen >= ctx->text_cap) {
-                    ctx->text_cap = (ctx->text_cap + tlen) * 2;
-                    char *nb = realloc(ctx->text_buf, ctx->text_cap);
-                    if (nb) ctx->text_buf = nb;
+                    size_t new_cap = (ctx->text_cap + tlen) * 2;
+                    char *nb = realloc(ctx->text_buf, new_cap);
+                    if (!nb) continue; // skip on OOM
+                    ctx->text_buf = nb;
+                    ctx->text_cap = new_cap;
                 }
                 memcpy(ctx->text_buf + ctx->text_len, text, tlen);
                 ctx->text_len += tlen;
@@ -311,9 +323,11 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                     if (tc_args && tc_args_len > 0 && (size_t)idx < MAX_TOOL_CALLS) {
                         size_t ci = (size_t)idx;
                         if (ctx->tool_calls[ci].args_len + tc_args_len >= ctx->tool_calls[ci].args_cap) {
-                            ctx->tool_calls[ci].args_cap = (ctx->tool_calls[ci].args_cap + tc_args_len) * 2;
-                            char *nb = realloc(ctx->tool_calls[ci].args, ctx->tool_calls[ci].args_cap);
-                            if (nb) ctx->tool_calls[ci].args = nb;
+                            size_t new_cap = (ctx->tool_calls[ci].args_cap + tc_args_len) * 2;
+                            char *nb = realloc(ctx->tool_calls[ci].args, new_cap);
+                            if (!nb) continue; // skip on OOM
+                            ctx->tool_calls[ci].args = nb;
+                            ctx->tool_calls[ci].args_cap = new_cap;
                         }
                         memcpy(ctx->tool_calls[ci].args + ctx->tool_calls[ci].args_len, tc_args, tc_args_len);
                         ctx->tool_calls[ci].args_len += tc_args_len;
@@ -422,9 +436,21 @@ adam_llm_response_t adam_llm_call_http_stream(
     // URL
     const char *url = s->base_url;
     if (!url) {
-        url = (s->api_format == ADAM_API_ANTHROPIC)
-            ? "https://api.anthropic.com/v1/messages"
-            : "https://api.openai.com/v1/chat/completions";
+        if (s->api_format == ADAM_API_GEMINI) {
+            const char *model = s->model ? s->model : "gemini-2.0-flash";
+            size_t gurl_len = strlen(model) + (s->api_key ? strlen(s->api_key) : 0) + 128;
+            char *gurl = arena_alloc(arena, gurl_len);
+            if (gurl) {
+                snprintf(gurl, gurl_len,
+                    "https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s",
+                    model, s->api_key ? s->api_key : "");
+                url = gurl;
+            }
+        } else if (s->api_format == ADAM_API_ANTHROPIC) {
+            url = "https://api.anthropic.com/v1/messages";
+        } else {
+            url = "https://api.openai.com/v1/chat/completions";
+        }
     }
 
     // Auth
@@ -439,6 +465,8 @@ adam_llm_response_t adam_llm_call_http_stream(
 
     if (s->api_format == ADAM_API_ANTHROPIC) {
         snprintf(auth, auth_len, "x-api-key: %s", s->api_key);
+    } else if (s->api_format == ADAM_API_GEMINI) {
+        auth[0] = '\0'; // key in URL query string
     } else {
         snprintf(auth, auth_len, "Authorization: Bearer %s", s->api_key);
     }

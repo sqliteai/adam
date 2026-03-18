@@ -382,6 +382,145 @@ static void build_openai(
 }
 
 // ============================================================================
+// MARK: - Build request: Google Gemini
+// ============================================================================
+
+// Gemini format:
+// {
+//   "systemInstruction": {"role":"user","parts":[{"text":"..."}]},
+//   "contents": [
+//     {"role":"user","parts":[{"text":"..."}]},
+//     {"role":"model","parts":[{"text":"..."},{"functionCall":{"name":"...","args":{...}}}]},
+//     {"role":"user","parts":[{"functionResponse":{"name":"...","response":{"content":"..."}}}]}
+//   ],
+//   "tools": [{"functionDeclarations":[{"name":"...","description":"...","parameters":{...}}]}],
+//   "generationConfig": {"temperature":0.7,"maxOutputTokens":4096,"topP":1.0}
+// }
+
+static void build_gemini(
+    abuf_t *b,
+    const char *model,
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count,
+    float temperature, int max_tokens, float top_p,
+    const char *response_format
+) {
+    abuf_char(b, '{');
+
+    // System instruction (extract from msgs[0] if system role)
+    size_t start_idx = 0;
+    if (msg_count > 0 && msgs[0].role == ADAM_ROLE_SYSTEM) {
+        abuf_str(b, "\"systemInstruction\":{\"role\":\"user\",\"parts\":[{\"text\":");
+        abuf_json_string(b, msgs[0].content, msgs[0].content_len);
+        abuf_str(b, "}]}");
+        start_idx = 1;
+    }
+
+    // Contents array
+    if (start_idx > 0) abuf_char(b, ',');
+    abuf_str(b, "\"contents\":[");
+
+    int first = 1;
+    for (size_t i = start_idx; i < msg_count; i++) {
+        // Gemini requires alternating user/model. Merge consecutive same-role.
+        const char *role;
+        switch (msgs[i].role) {
+        case ADAM_ROLE_ASSISTANT: role = "model"; break;
+        case ADAM_ROLE_TOOL:     role = "user";  break; // tool results are "user" role
+        default:                 role = "user";  break;
+        }
+
+        if (!first) abuf_char(b, ',');
+        first = 0;
+
+        if (msgs[i].role == ADAM_ROLE_TOOL) {
+            // Tool result: functionResponse
+            // Find the tool name from previous assistant message's tool calls
+            const char *tool_name = "unknown";
+            for (size_t j = i; j > 0; j--) {
+                if (msgs[j-1].role == ADAM_ROLE_ASSISTANT && msgs[j-1].tool_call_count > 0) {
+                    // Match by tool_call_id
+                    for (size_t t = 0; t < msgs[j-1].tool_call_count; t++) {
+                        if (msgs[i].tool_call_id && msgs[j-1].tool_calls[t].id
+                            && strcmp(msgs[i].tool_call_id, msgs[j-1].tool_calls[t].id) == 0) {
+                            tool_name = msgs[j-1].tool_calls[t].name;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+            abuf_fmt(b, "{\"role\":\"%s\",\"parts\":[{\"functionResponse\":{\"name\":", role);
+            abuf_json_cstr(b, tool_name);
+            abuf_str(b, ",\"response\":{\"content\":");
+            abuf_json_string(b, msgs[i].content, msgs[i].content_len);
+            abuf_str(b, "}}}]}");
+        } else if (msgs[i].role == ADAM_ROLE_ASSISTANT && msgs[i].tool_call_count > 0) {
+            // Assistant with tool calls
+            abuf_fmt(b, "{\"role\":\"%s\",\"parts\":[", role);
+            int first_part = 1;
+            if (msgs[i].content_len > 0) {
+                abuf_str(b, "{\"text\":");
+                abuf_json_string(b, msgs[i].content, msgs[i].content_len);
+                abuf_char(b, '}');
+                first_part = 0;
+            }
+            for (size_t t = 0; t < msgs[i].tool_call_count; t++) {
+                if (!first_part) abuf_char(b, ',');
+                first_part = 0;
+                abuf_str(b, "{\"functionCall\":{\"name\":");
+                abuf_json_cstr(b, msgs[i].tool_calls[t].name);
+                abuf_str(b, ",\"args\":");
+                // args is raw JSON — insert directly
+                const char *args = msgs[i].tool_calls[t].arguments_json;
+                abuf_str(b, args ? args : "{}");
+                abuf_str(b, "}}");
+            }
+            abuf_str(b, "]}");
+        } else {
+            // Regular user or assistant text message
+            abuf_fmt(b, "{\"role\":\"%s\",\"parts\":[{\"text\":", role);
+            abuf_json_string(b, msgs[i].content, msgs[i].content_len);
+            abuf_str(b, "}]}");
+        }
+    }
+    abuf_char(b, ']');
+
+    // Tools
+    if (tool_count > 0) {
+        abuf_str(b, ",\"tools\":[{\"functionDeclarations\":[");
+        for (size_t i = 0; i < tool_count; i++) {
+            if (i > 0) abuf_char(b, ',');
+            abuf_str(b, "{\"name\":");
+            abuf_json_cstr(b, tools[i].name);
+            abuf_str(b, ",\"description\":");
+            abuf_json_cstr(b, tools[i].description ? tools[i].description : "");
+            abuf_str(b, ",\"parameters\":");
+            abuf_str(b, tools[i].parameters_json
+                        ? tools[i].parameters_json
+                        : "{\"type\":\"object\",\"properties\":{}}");
+            abuf_char(b, '}');
+        }
+        abuf_str(b, "]}]");
+    }
+
+    // Generation config
+    abuf_fmt(b, ",\"generationConfig\":{\"temperature\":%.2f", (double)temperature);
+    abuf_fmt(b, ",\"maxOutputTokens\":%d", max_tokens);
+    if (top_p < 0.99f) abuf_fmt(b, ",\"topP\":%.2f", (double)top_p);
+    if (response_format && strcmp(response_format, "json") == 0) {
+        abuf_str(b, ",\"responseMimeType\":\"application/json\"");
+    }
+    // Image generation models: include IMAGE in responseModalities
+    if (model && strstr(model, "image")) {
+        abuf_str(b, ",\"responseModalities\":[\"TEXT\",\"IMAGE\"]");
+    }
+    abuf_char(b, '}');
+
+    abuf_char(b, '}');
+}
+
+// ============================================================================
 // MARK: - Build request (public)
 // ============================================================================
 
@@ -406,6 +545,9 @@ const char *adam_json_build_request(
     if (format == ADAM_API_ANTHROPIC) {
         build_anthropic(&b, model, msgs, msg_count, tools, tool_count,
                         temperature, max_tokens, response_format);
+    } else if (format == ADAM_API_GEMINI) {
+        build_gemini(&b, model, msgs, msg_count, tools, tool_count,
+                     temperature, max_tokens, top_p, response_format);
     } else {
         build_openai(&b, model, msgs, msg_count, tools, tool_count,
                      temperature, max_tokens, top_p, response_format);
@@ -711,6 +853,226 @@ static adam_llm_response_t parse_openai(
 }
 
 // ============================================================================
+// MARK: - Parse response: Google Gemini
+// ============================================================================
+
+// Gemini response format:
+// {
+//   "candidates": [{
+//     "content": {
+//       "role": "model",
+//       "parts": [
+//         {"text": "..."},
+//         {"functionCall": {"name": "...", "args": {...}}}
+//       ]
+//     },
+//     "finishReason": "STOP" | "FUNCTION_CALL"
+//   }],
+//   "usageMetadata": {"promptTokenCount": N, "candidatesTokenCount": N}
+// }
+
+static adam_llm_response_t parse_gemini(
+    arena_t *arena, const char *json, const jsmntok_t *tokens, int ntok
+) {
+    adam_llm_response_t resp = {0};
+
+    if (ntok < 1 || tokens[0].type != JSMN_OBJECT) {
+        resp.error = ADAM_ERR_JSON;
+        resp.error_msg = arena_strdup(arena, "expected JSON object");
+        return resp;
+    }
+
+    // Check for error: {"error":{"message":"...","code":N}}
+    for (int i = 1; i < ntok - 1; i++) {
+        if (tok_eq(json, &tokens[i], "error") && tokens[i+1].type == JSMN_OBJECT) {
+            resp.error = ADAM_ERR_PROVIDER;
+            int k = i + 2;
+            int obj_size = tokens[i+1].size;
+            for (int f = 0; f < obj_size && k < ntok - 1; f++) {
+                if (tok_eq(json, &tokens[k], "message") && tokens[k+1].type == JSMN_STRING) {
+                    resp.error_msg = tok_str_unesc(arena, json, &tokens[k+1]);
+                    return resp;
+                }
+                k++;
+                k = tok_skip(tokens, k, ntok);
+            }
+            resp.error_msg = arena_strdup(arena, "unknown Gemini API error");
+            return resp;
+        }
+    }
+
+    abuf_t text_buf = abuf_new(arena, 1024);
+    size_t tc_cap = 8;
+    adam_tool_call_t *tc_arr = arena_alloc(arena, tc_cap * sizeof(adam_tool_call_t));
+    size_t tc_count = 0;
+
+    // Walk top-level keys
+    int i = 1;
+    while (i < ntok - 1) {
+        if (tok_eq(json, &tokens[i], "candidates") && tokens[i+1].type == JSMN_ARRAY) {
+            int arr_size = tokens[i+1].size;
+            if (arr_size < 1) { i = tok_skip(tokens, i + 1, ntok); continue; }
+
+            // First candidate
+            int cand = i + 2;
+            if (cand >= ntok || tokens[cand].type != JSMN_OBJECT) {
+                i = tok_skip(tokens, i + 1, ntok); continue;
+            }
+
+            int cand_size = tokens[cand].size;
+            int k = cand + 1;
+            for (int f = 0; f < cand_size && k < ntok - 1; f++) {
+                if (tok_eq(json, &tokens[k], "content") && tokens[k+1].type == JSMN_OBJECT) {
+                    // Parse content.parts[]
+                    int content_size = tokens[k+1].size;
+                    int m = k + 2;
+                    for (int mf = 0; mf < content_size && m < ntok - 1; mf++) {
+                        if (tok_eq(json, &tokens[m], "parts") && tokens[m+1].type == JSMN_ARRAY) {
+                            int parts_size = tokens[m+1].size;
+                            int p = m + 2;
+                            for (int pe = 0; pe < parts_size && p < ntok; pe++) {
+                                if (tokens[p].type != JSMN_OBJECT) {
+                                    p = tok_skip(tokens, p, ntok); continue;
+                                }
+                                int part_size = tokens[p].size;
+                                int q = p + 1;
+                                for (int qf = 0; qf < part_size && q < ntok - 1; qf++) {
+                                    if (tok_eq(json, &tokens[q], "text")
+                                        && tokens[q+1].type == JSMN_STRING) {
+                                        const char *t = tok_str_unesc(arena, json, &tokens[q+1]);
+                                        if (t) abuf_str(&text_buf, t);
+                                        q += 2;
+                                    } else if (tok_eq(json, &tokens[q], "functionCall")
+                                               && tokens[q+1].type == JSMN_OBJECT) {
+                                        // Parse functionCall: {name, args}
+                                        const char *fc_name = NULL;
+                                        int args_start = -1, args_end = -1;
+                                        int fc_size = tokens[q+1].size;
+                                        int r = q + 2;
+                                        for (int rf = 0; rf < fc_size && r < ntok - 1; rf++) {
+                                            if (tok_eq(json, &tokens[r], "name")) {
+                                                fc_name = tok_str(arena, json, &tokens[r+1]);
+                                                r += 2;
+                                            } else if (tok_eq(json, &tokens[r], "args")) {
+                                                args_start = tokens[r+1].start;
+                                                args_end = tokens[r+1].end;
+                                                r++;
+                                                r = tok_skip(tokens, r, ntok);
+                                            } else {
+                                                r++;
+                                                r = tok_skip(tokens, r, ntok);
+                                            }
+                                        }
+                                        if (fc_name) {
+                                            if (tc_count >= tc_cap) {
+                                                tc_cap *= 2;
+                                                adam_tool_call_t *new_a = arena_alloc(arena,
+                                                    tc_cap * sizeof(adam_tool_call_t));
+                                                memcpy(new_a, tc_arr,
+                                                       tc_count * sizeof(adam_tool_call_t));
+                                                tc_arr = new_a;
+                                            }
+                                            // Gemini has no tool call IDs — generate one
+                                            char id_buf[32];
+                                            snprintf(id_buf, sizeof(id_buf),
+                                                     "gemini_%zu", tc_count);
+                                            tc_arr[tc_count].id = arena_strdup(arena, id_buf);
+                                            tc_arr[tc_count].name = fc_name;
+                                            if (args_start >= 0 && args_end > args_start) {
+                                                size_t alen = (size_t)(args_end - args_start);
+                                                char *a = arena_alloc(arena, alen + 1);
+                                                memcpy(a, json + args_start, alen);
+                                                a[alen] = '\0';
+                                                tc_arr[tc_count].arguments_json = a;
+                                            } else {
+                                                tc_arr[tc_count].arguments_json =
+                                                    arena_strdup(arena, "{}");
+                                            }
+                                            tc_count++;
+                                        }
+                                        q++;
+                                        q = tok_skip(tokens, q, ntok);
+                                    } else if (tok_eq(json, &tokens[q], "inline_data")
+                                               && tokens[q+1].type == JSMN_OBJECT) {
+                                        // Image data: {mime_type, data}
+                                        const char *mime = NULL;
+                                        const char *b64_data = NULL;
+                                        int id_size = tokens[q+1].size;
+                                        int r = q + 2;
+                                        for (int rf = 0; rf < id_size && r < ntok - 1; rf++) {
+                                            if (tok_eq(json, &tokens[r], "mime_type")) {
+                                                mime = tok_str(arena, json, &tokens[r+1]);
+                                                r += 2;
+                                            } else if (tok_eq(json, &tokens[r], "data")) {
+                                                b64_data = tok_str(arena, json, &tokens[r+1]);
+                                                r += 2;
+                                            } else {
+                                                r++; r = tok_skip(tokens, r, ntok);
+                                            }
+                                        }
+                                        if (mime && b64_data) {
+                                            // Embed as data URI in text
+                                            abuf_str(&text_buf, "\n![image](data:");
+                                            abuf_str(&text_buf, mime);
+                                            abuf_str(&text_buf, ";base64,");
+                                            abuf_str(&text_buf, b64_data);
+                                            abuf_str(&text_buf, ")\n");
+                                        }
+                                        q++;
+                                        q = tok_skip(tokens, q, ntok);
+                                    } else {
+                                        q++;
+                                        q = tok_skip(tokens, q, ntok);
+                                    }
+                                }
+                                p = tok_skip(tokens, p, ntok);
+                            }
+                            m++;
+                            m = tok_skip(tokens, m, ntok);
+                        } else {
+                            m++;
+                            m = tok_skip(tokens, m, ntok);
+                        }
+                    }
+                    k++;
+                    k = tok_skip(tokens, k, ntok);
+                } else {
+                    k++;
+                    k = tok_skip(tokens, k, ntok);
+                }
+            }
+            i = tok_skip(tokens, i + 1, ntok);
+        } else if (tok_eq(json, &tokens[i], "usageMetadata") && tokens[i+1].type == JSMN_OBJECT) {
+            int obj_size = tokens[i+1].size;
+            int k = i + 2;
+            for (int f = 0; f < obj_size && k < ntok - 1; f++) {
+                if (tok_eq(json, &tokens[k], "promptTokenCount")) {
+                    resp.input_tokens = tok_int(json, &tokens[k+1]);
+                    k += 2;
+                } else if (tok_eq(json, &tokens[k], "candidatesTokenCount")) {
+                    resp.output_tokens = tok_int(json, &tokens[k+1]);
+                    k += 2;
+                } else {
+                    k++;
+                    k = tok_skip(tokens, k, ntok);
+                }
+            }
+            i = tok_skip(tokens, i + 1, ntok);
+        } else {
+            i++;
+            i = tok_skip(tokens, i, ntok);
+        }
+    }
+
+    resp.content = (text_buf.len > 0) ? text_buf.buf : NULL;
+    if (tc_count > 0) {
+        resp.tool_calls = tc_arr;
+        resp.tool_call_count = tc_count;
+    }
+    return resp;
+}
+
+// ============================================================================
 // MARK: - Parse response (public)
 // ============================================================================
 
@@ -752,6 +1114,8 @@ adam_llm_response_t adam_json_parse_response(
 
     if (format == ADAM_API_ANTHROPIC) {
         return parse_anthropic(arena, json, tokens, ntok);
+    } else if (format == ADAM_API_GEMINI) {
+        return parse_gemini(arena, json, tokens, ntok);
     } else {
         return parse_openai(arena, json, tokens, ntok);
     }

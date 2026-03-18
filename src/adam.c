@@ -1730,6 +1730,14 @@ static adam_model_info_t g_builtin_models[] = {
     { "gpt-4o-mini",        128000,  0.15f, 0.60f },
     { "o3",                 200000, 10.0f, 40.0f },
     { "o4-mini",            200000,  1.1f,  4.4f },
+    // Google
+    { "gemini-2.5-pro",    1048576,  1.25f,  10.0f },
+    { "gemini-2.5-flash",  1048576,  0.15f,   0.6f },
+    { "gemini-3.1-flash",  1048576,  0.15f,   0.6f },
+    { "gemini-3-pro",      1048576,  1.25f,  10.0f },
+    { "gemini-2.0-flash",  1048576,  0.10f,   0.4f },
+    { "gemini-1.5-pro",    2097152,  1.25f,   5.0f },
+    { "gemini-1.5-flash",  1048576,  0.075f,  0.3f },
     // Sentinel
     { NULL, 0, 0, 0 },
 };

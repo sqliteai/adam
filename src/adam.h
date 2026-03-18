@@ -108,6 +108,7 @@ typedef enum {
     ADAM_API_OPENAI              = 2,   // OpenAI Chat Completions format
                                        //   (also: Groq, Together, Ollama,
                                        //    vLLM, LM Studio, any compatible)
+    ADAM_API_GEMINI              = 3,   // Google Gemini API format
 } adam_api_format_t;
 
 // ============================================================================

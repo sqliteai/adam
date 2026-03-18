@@ -80,6 +80,7 @@ static adam_status_t findings_push(adam_research_result_t *r,
 
     adam_research_finding_t *f = &r->findings[r->finding_count];
     f->content = content ? strdup(content) : NULL;
+    if (content && !f->content) return ADAM_ERR_ALLOC;
     f->source = source ? strdup(source) : NULL;
     f->iteration = iteration;
     r->finding_count = new_count;
@@ -97,7 +98,8 @@ static void parse_findings(adam_research_result_t *r, const char *response,
     if (!response) return;
 
     const char *p = response;
-    while ((p = strstr(p, "FINDING:")) != NULL) {
+    int max_findings = 100;
+    while ((p = strstr(p, "FINDING:")) != NULL && max_findings-- > 0) {
         p += 8; // skip "FINDING:"
         while (*p == ' ') p++;
 
@@ -329,7 +331,7 @@ adam_research_result_t adam_research(adam_settings_t *settings,
         }
 
         // Build iteration prompt
-        char *prompt;
+        char *prompt = NULL;
         if (i == 0) {
             prompt = build_continue_prompt(NULL, 0, 0);
         } else {
@@ -381,6 +383,9 @@ adam_research_result_t adam_research(adam_settings_t *settings,
                 report_start++;
             if (*report_start) {
                 result.report = strdup(report_start);
+            } else {
+                // RESEARCH_COMPLETE with no trailing text — use full response
+                result.report = strdup(run.final_response);
             }
             result.status = ADAM_OK;
             result.stop_reason = ADAM_RESEARCH_STOP_COMPLETE;
