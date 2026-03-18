@@ -61,7 +61,7 @@ Destroy a settings struct and all owned resources (tools, bootstrap files, allow
 adam_status_t adam_settings_set_provider(adam_settings_t *s,
     adam_api_format_t format, const char *api_key, const char *model);
 ```
-Configure a remote LLM API provider. `format` is `ADAM_API_ANTHROPIC` or `ADAM_API_OPENAI`.
+Configure a remote LLM API provider. `format` is `ADAM_API_ANTHROPIC`, `ADAM_API_OPENAI`, or `ADAM_API_GEMINI`.
 
 ```c
 adam_status_t adam_settings_set_base_url(adam_settings_t *s, const char *url);
@@ -526,6 +526,13 @@ Estimate cost in USD.
 | `gpt-4o-mini` | 128K | 0.15 | 0.60 |
 | `o3` | 200K | 10.0 | 40.0 |
 | `o4-mini` | 200K | 1.1 | 4.4 |
+| `gemini-2.5-pro` | 1M | 1.25 | 10.0 |
+| `gemini-2.5-flash` | 1M | 0.15 | 0.60 |
+| `gemini-3.1-flash` | 1M | 0.15 | 0.60 |
+| `gemini-3-pro` | 1M | 1.25 | 10.0 |
+| `gemini-2.0-flash` | 1M | 0.10 | 0.40 |
+| `gemini-1.5-pro` | 2M | 1.25 | 5.0 |
+| `gemini-1.5-flash` | 1M | 0.075 | 0.30 |
 
 ---
 
@@ -682,7 +689,7 @@ File, directory, and shell tools require `adam_settings_allow_dir()` for sandbox
 ## Enums
 
 ### `adam_api_format_t`
-`ADAM_API_NONE` (0), `ADAM_API_ANTHROPIC` (1), `ADAM_API_OPENAI` (2)
+`ADAM_API_NONE` (0), `ADAM_API_ANTHROPIC` (1), `ADAM_API_OPENAI` (2), `ADAM_API_GEMINI` (3)
 
 ### `adam_role_t`
 `ADAM_ROLE_SYSTEM` (0), `ADAM_ROLE_USER` (1), `ADAM_ROLE_ASSISTANT` (2), `ADAM_ROLE_TOOL` (3)

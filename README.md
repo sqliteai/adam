@@ -2,7 +2,7 @@
 
 Embeddable AI agent library in C.
 
-Adam gives you a complete agent loop: tool calling, memory, sessions, voice, streaming, structured output, in one `#include`. Works with cloud APIs (Anthropic, OpenAI, Groq, Together, xAI) and local models (llama.cpp) through the same interface. Compiles on macOS, Linux, Windows, iOS, Android, and WASM.
+Adam gives you a complete agent loop: tool calling, memory, sessions, voice, streaming, structured output, in one `#include`. Works with cloud APIs (Anthropic, OpenAI, Google Gemini, Groq, Together, xAI) and local models (llama.cpp) through the same interface. Compiles on macOS, Linux, Windows, iOS, Android, and WASM.
 
 ## Quick Start
 
@@ -32,7 +32,7 @@ int main(void) {
 ```bash
 make deps    # build llama.cpp + whisper.cpp
 make all     # build libadam.a
-make test    # run 138 tests (ASan + UBSan)
+make test    # run 161 tests (ASan + UBSan)
 ```
 
 ## Features
@@ -40,8 +40,9 @@ make test    # run 138 tests (ASan + UBSan)
 | Feature | Description |
 |---------|-------------|
 | **Agent loop** | Tool calling with automatic iteration until final response |
-| **Dual providers** | Cloud APIs (Anthropic/OpenAI format) + local GGUF via llama.cpp |
-| **12 built-in tools** | File I/O, shell, calculator, SQL, web fetch/search, HTTP POST, memory, research, multi-agent |
+| **Three providers** | Anthropic, OpenAI, Google Gemini + any compatible API + local GGUF via llama.cpp |
+| **Image generation** | Native image output via Gemini image models (gemini-3.1-flash-image-preview) |
+| **13 built-in tools** | File I/O, shell, calculator, SQL, web fetch/search, HTTP POST, memory, research, multi-agent |
 | **Long-term memory** | Hybrid BM25 + vector search via SQLite (sqlite-memory + sqlite-vector) |
 | **Session persistence** | Save/load conversations with UUIDv7 keys |
 | **Voice** | STT (Whisper cloud/local) + TTS (cloud/system) + full audio pipeline |
@@ -139,7 +140,40 @@ adam_run_result_t r = adam_run(s, h, "Write a haiku about programming.");
 printf("%s\n", r.final_response);
 ```
 
-### 4. Structured JSON Output
+### 4. Google Gemini
+
+```c
+adam_settings_t *s = adam_create_settings();
+adam_settings_set_provider(s, ADAM_API_GEMINI,
+                           getenv("GEMINI_API_KEY"),
+                           "gemini-2.5-flash");
+
+adam_history_t *h = adam_history_create();
+adam_run_result_t r = adam_run(s, h, "Explain how transformers work.");
+printf("%s\n", r.final_response);
+// Works with all Gemini models: 2.5-pro, 2.5-flash, 2.0-flash, 1.5-pro, etc.
+```
+
+### 5. Image Generation (Gemini)
+
+```c
+adam_settings_t *s = adam_create_settings();
+adam_settings_set_provider(s, ADAM_API_GEMINI,
+                           getenv("GEMINI_API_KEY"),
+                           "gemini-3.1-flash-image-preview");
+
+adam_history_t *h = adam_history_create();
+adam_run_result_t r = adam_run(s, h, "Draw a cute cat wearing a tiny hat");
+
+// r.final_response contains text + embedded image as data URI:
+//   "Here is your cat:\n![image](data:image/png;base64,iVBORw0KGgo...)\n"
+//
+// Extract the base64 data to save as PNG, or in React Native/Expo:
+//   <Image source={{uri: dataUri}} />
+printf("%s\n", r.final_response);
+```
+
+### 6. Structured JSON Output
 
 ```c
 adam_settings_t *s = adam_create_settings();
@@ -159,7 +193,7 @@ if (r.json_valid) {
 adam_json_result_free(&r);
 ```
 
-### 5. Long-Term Memory
+### 7. Long-Term Memory
 
 ```c
 // Open memory database
@@ -181,7 +215,7 @@ adam_run_result_t r = adam_run(s, h, "What does the user prefer for UI theme?");
 adam_memory_close(mem);
 ```
 
-### 6. Session Persistence
+### 8. Session Persistence
 
 ```c
 adam_memory_t *mem = adam_memory_open("sessions.db");
@@ -206,7 +240,7 @@ adam_session_load(mem, session_id, h2);
 // h2 now contains the full conversation history
 ```
 
-### 7. Streaming Responses
+### 9. Streaming Responses
 
 ```c
 void on_token(void *ctx, const char *chunk, size_t len, int is_done) {
@@ -223,7 +257,7 @@ adam_run(s, h, "Write a short story about a robot.");
 // Tokens stream to stdout in real-time
 ```
 
-### 8. Voice Agent
+### 10. Voice Agent
 
 ```c
 adam_settings_t *s = adam_create_settings();
@@ -239,7 +273,7 @@ adam_run_result_t r = adam_voice_run(s, h, audio, audio_len, ADAM_AUDIO_WAV);
 // Plays the response aloud via system TTS
 ```
 
-### 9. Multi-Agent Orchestration
+### 11. Multi-Agent Orchestration
 
 ```c
 // Create a specialized researcher agent
@@ -270,7 +304,7 @@ adam_run_result_t r = adam_run(s, h,
 // Main agent delegates to researcher, gets back findings, synthesizes response
 ```
 
-### 10. Evolution Loop (Self-Improving Agent)
+### 12. Evolution Loop (Self-Improving Agent)
 
 ```c
 // Evaluation function: scores each attempt
@@ -297,7 +331,7 @@ printf("Insights:\n%s\n", r.insights);
 adam_evolve_result_free(&r);
 ```
 
-### 11. Research Mode
+### 13. Research Mode
 
 ```c
 adam_settings_t *s = adam_create_settings();
@@ -321,7 +355,7 @@ printf("Found %zu findings across %d iterations\n",
 adam_research_result_free(&r);
 ```
 
-### 12. Built-in Tools with Filesystem Sandbox
+### 14. Built-in Tools with Filesystem Sandbox
 
 ```c
 adam_settings_t *s = adam_create_settings();
@@ -356,7 +390,7 @@ adam_run_result_t r = adam_run(s, h,
 // Attempts to access /etc or ~ will be denied
 ```
 
-### 13. Guardrails
+### 15. Guardrails
 
 ```c
 // Block requests containing sensitive topics
@@ -381,7 +415,7 @@ s->on_after_receive = check_output;
 // If either guardrail denies, adam_run returns ADAM_ERR_GUARDRAIL
 ```
 
-### 14. Response Caching
+### 16. Response Caching
 
 ```c
 adam_cache_t *cache = adam_cache_create(256);  // LRU, max 256 entries
@@ -402,7 +436,7 @@ printf("Hits: %zu, Misses: %zu\n",
 adam_cache_destroy(cache);
 ```
 
-### 15. Thread Pool (Concurrent Agents)
+### 17. Thread Pool (Concurrent Agents)
 
 ```c
 void on_done(void *ctx, adam_run_result_t result) {
@@ -430,7 +464,7 @@ for (int i = 0; i < 10; i++) {
 adam_pool_destroy(pool);  // waits for all jobs to complete
 ```
 
-### 16. Full Agent with Everything
+### 18. Full Agent with Everything
 
 ```c
 adam_init();
