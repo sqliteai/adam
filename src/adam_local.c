@@ -101,9 +101,12 @@ static adam_local_ctx_t *local_init(const adam_settings_t *s) {
         return NULL;
     }
 
-    // Sampler chain: temperature → distribution sampling
+    // Sampler chain: top_p → temperature → distribution
     struct llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
     struct llama_sampler *sampler = llama_sampler_chain_init(sparams);
+    if (s->top_p < 0.99f)
+        llama_sampler_chain_add(sampler,
+            llama_sampler_init_top_p(s->top_p, 1));
     llama_sampler_chain_add(sampler,
         llama_sampler_init_temp(s->temperature));
     llama_sampler_chain_add(sampler,

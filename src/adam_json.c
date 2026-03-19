@@ -189,6 +189,42 @@ static int tok_skip(const jsmntok_t *tokens, int pos, int ntok) {
 }
 
 // ============================================================================
+// MARK: - Base64 encoding (for image attachments)
+// ============================================================================
+
+static const char b64_table[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void abuf_base64(abuf_t *b, const uint8_t *data, size_t len) {
+    size_t out_len = ((len + 2) / 3) * 4;
+    if (!abuf_grow(b, out_len + 1)) return;
+    char *out = b->buf + b->len;
+    size_t j = 0;
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t v = (uint32_t)data[i] << 16;
+        if (i + 1 < len) v |= (uint32_t)data[i+1] << 8;
+        if (i + 2 < len) v |= (uint32_t)data[i+2];
+        out[j++] = b64_table[(v >> 18) & 0x3F];
+        out[j++] = b64_table[(v >> 12) & 0x3F];
+        out[j++] = (i + 1 < len) ? b64_table[(v >> 6) & 0x3F] : '=';
+        out[j++] = (i + 2 < len) ? b64_table[v & 0x3F] : '=';
+    }
+    b->len += j;
+    b->buf[b->len] = '\0';
+}
+
+static const char *media_type_string(adam_media_type_t type) {
+    switch (type) {
+    case ADAM_MEDIA_IMAGE_PNG:  return "image/png";
+    case ADAM_MEDIA_IMAGE_JPEG: return "image/jpeg";
+    case ADAM_MEDIA_IMAGE_GIF:  return "image/gif";
+    case ADAM_MEDIA_IMAGE_WEBP: return "image/webp";
+    case ADAM_MEDIA_PDF:        return "application/pdf";
+    default:                    return "application/octet-stream";
+    }
+}
+
+// ============================================================================
 // MARK: - Build request: Anthropic Messages API
 // ============================================================================
 
@@ -197,12 +233,15 @@ static void build_anthropic(
     const char *model,
     const adam_message_t *msgs, size_t msg_count,
     const adam_tool_def_t *tools, size_t tool_count,
-    float temperature, int max_tokens, const char *response_format
+    float temperature, int max_tokens, float top_p,
+    const char *response_format
 ) {
+    UNUSED_PARAM(response_format);
     abuf_str(b, "{\"model\":");
     abuf_json_cstr(b, model);
     abuf_fmt(b, ",\"max_tokens\":%d", max_tokens);
     abuf_fmt(b, ",\"temperature\":%.2f", (double)temperature);
+    if (top_p < 0.99f) abuf_fmt(b, ",\"top_p\":%.2f", (double)top_p);
 
     // System message (Anthropic puts it outside the messages array)
     if (msg_count > 0 && msgs[0].role == ADAM_ROLE_SYSTEM) {
@@ -253,6 +292,26 @@ static void build_anthropic(
                 abuf_char(b, '}');
             }
             abuf_str(b, "]}");
+        } else if (msgs[i].role == ADAM_ROLE_USER && msgs[i].attachment_count > 0) {
+            // User message with image attachments
+            abuf_fmt(b, "{\"role\":\"%s\",\"content\":[", role);
+            // Image blocks first
+            for (size_t a = 0; a < msgs[i].attachment_count; a++) {
+                const adam_attachment_t *att = &msgs[i].attachments[a];
+                if (a > 0) abuf_char(b, ',');
+                abuf_str(b, "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":");
+                abuf_json_cstr(b, media_type_string(att->type));
+                abuf_str(b, ",\"data\":\"");
+                abuf_base64(b, att->data, att->data_len);
+                abuf_str(b, "\"}}");
+            }
+            // Text block
+            if (msgs[i].content_len > 0) {
+                abuf_str(b, ",{\"type\":\"text\",\"text\":");
+                abuf_json_string(b, msgs[i].content, msgs[i].content_len);
+                abuf_char(b, '}');
+            }
+            abuf_str(b, "]}");
         } else {
             // Simple text message
             abuf_fmt(b, "{\"role\":\"%s\",\"content\":", role);
@@ -279,10 +338,6 @@ static void build_anthropic(
         }
         abuf_char(b, ']');
     }
-
-    // Response format (Anthropic doesn't have a direct json_mode,
-    // but we can hint via tool_choice or prefill)
-    UNUSED_PARAM(response_format);
 
     abuf_char(b, '}');
 }
@@ -345,6 +400,24 @@ static void build_openai(
                 abuf_json_cstr(b, msgs[i].tool_calls[t].arguments_json
                                    ? msgs[i].tool_calls[t].arguments_json : "{}");
                 abuf_str(b, "}}");
+            }
+            abuf_str(b, "]}");
+        } else if (msgs[i].role == ADAM_ROLE_USER && msgs[i].attachment_count > 0) {
+            // User message with image attachments (OpenAI vision format)
+            abuf_fmt(b, "{\"role\":\"%s\",\"content\":[", role);
+            for (size_t a = 0; a < msgs[i].attachment_count; a++) {
+                const adam_attachment_t *att = &msgs[i].attachments[a];
+                if (a > 0) abuf_char(b, ',');
+                abuf_str(b, "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:");
+                abuf_str(b, media_type_string(att->type));
+                abuf_str(b, ";base64,");
+                abuf_base64(b, att->data, att->data_len);
+                abuf_str(b, "\"}}");
+            }
+            if (msgs[i].content_len > 0) {
+                abuf_str(b, ",{\"type\":\"text\",\"text\":");
+                abuf_json_string(b, msgs[i].content, msgs[i].content_len);
+                abuf_char(b, '}');
             }
             abuf_str(b, "]}");
         } else {
@@ -477,6 +550,24 @@ static void build_gemini(
                 abuf_str(b, "}}");
             }
             abuf_str(b, "]}");
+        } else if (msgs[i].role == ADAM_ROLE_USER && msgs[i].attachment_count > 0) {
+            // User message with image attachments (Gemini inlineData format)
+            abuf_fmt(b, "{\"role\":\"%s\",\"parts\":[", role);
+            for (size_t a = 0; a < msgs[i].attachment_count; a++) {
+                const adam_attachment_t *att = &msgs[i].attachments[a];
+                if (a > 0) abuf_char(b, ',');
+                abuf_str(b, "{\"inlineData\":{\"mimeType\":");
+                abuf_json_cstr(b, media_type_string(att->type));
+                abuf_str(b, ",\"data\":\"");
+                abuf_base64(b, att->data, att->data_len);
+                abuf_str(b, "\"}}");
+            }
+            if (msgs[i].content_len > 0) {
+                abuf_str(b, ",{\"text\":");
+                abuf_json_string(b, msgs[i].content, msgs[i].content_len);
+                abuf_char(b, '}');
+            }
+            abuf_str(b, "]}");
         } else {
             // Regular user or assistant text message
             abuf_fmt(b, "{\"role\":\"%s\",\"parts\":[{\"text\":", role);
@@ -544,7 +635,7 @@ const char *adam_json_build_request(
 
     if (format == ADAM_API_ANTHROPIC) {
         build_anthropic(&b, model, msgs, msg_count, tools, tool_count,
-                        temperature, max_tokens, response_format);
+                        temperature, max_tokens, top_p, response_format);
     } else if (format == ADAM_API_GEMINI) {
         build_gemini(&b, model, msgs, msg_count, tools, tool_count,
                      temperature, max_tokens, top_p, response_format);
