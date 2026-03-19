@@ -10,6 +10,9 @@
 //
 
 #include "adam.h"
+#ifndef ADAM_NO_SQLITE
+#include "sqlite3.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +26,7 @@
 static adam_settings_t  *g_settings = NULL;
 static adam_history_t   *g_history  = NULL;
 static adam_memory_t    *g_memory   = NULL;
+static adam_memory_t    *g_userdb   = NULL;   // user's SQLite database (/db)
 static adam_cache_t     *g_cache    = NULL;
 static int               g_streaming = 1;
 static int               g_turn = 0;
@@ -180,7 +184,8 @@ static void cmd_help(void) {
     printf("    /sandbox <dir>      Allow directory for file/shell tools\n");
     printf("    /cache              Enable response cache\n");
     printf("\n");
-    printf("  Memory & sessions:\n");
+    printf("  Database & memory:\n");
+    printf("    /db <path>          Open a SQLite database (enables sql_query tool)\n");
     printf("    /memory [db_path]   Enable memory system (default: adam_memory.db)\n");
     printf("    /session [id]       Create or load a session\n");
     printf("    /sessions           List all saved sessions\n");
@@ -327,6 +332,138 @@ static void cmd_cache(void) {
 }
 
 #ifndef ADAM_NO_SQLITE
+
+extern sqlite3 *adam_memory_db(adam_memory_t *mem);
+
+static char *read_db_schema(adam_memory_t *db_mem) {
+    sqlite3 *db = adam_memory_db(db_mem);
+    if (!db) return NULL;
+
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+
+    #define SCHEMA_APPEND(...) do { \
+        int n = snprintf(buf + len, cap - len, __VA_ARGS__); \
+        if (n > 0) { \
+            if (len + (size_t)n >= cap) { \
+                cap *= 2; \
+                char *nb = realloc(buf, cap); \
+                if (!nb) { free(buf); return NULL; } \
+                buf = nb; \
+                snprintf(buf + len, cap - len, __VA_ARGS__); \
+            } \
+            len += (size_t)n; \
+        } \
+    } while(0)
+
+    // Query sqlite_master for all schema objects (exclude internal adam tables)
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE sql IS NOT NULL "
+        "AND name NOT LIKE 'dbmem_%' "
+        "AND name NOT LIKE '_sqliteai_%' "
+        "AND name NOT LIKE 'sqlite_%' "
+        "AND name NOT IN ('sessions', 'messages') "
+        "ORDER BY type, name", -1, &vm, NULL);
+    if (rc != SQLITE_OK) { free(buf); return NULL; }
+
+    const char *prev_type = "";
+    while (sqlite3_step(vm) == SQLITE_ROW) {
+        const char *type = (const char *)sqlite3_column_text(vm, 0);
+        const char *sql  = (const char *)sqlite3_column_text(vm, 2);
+        if (!type || !sql) continue;
+
+        if (strcmp(type, prev_type) != 0) {
+            SCHEMA_APPEND("\n-- %ss:\n", type);
+            prev_type = type;
+        }
+        SCHEMA_APPEND("%s;\n", sql);
+    }
+    sqlite3_finalize(vm);
+
+    // Add row counts for each table
+    rc = sqlite3_prepare_v2(db,
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name NOT LIKE 'sqlite_%' "
+        "AND name NOT LIKE 'dbmem_%' "
+        "AND name NOT LIKE '_sqliteai_%' "
+        "AND name NOT IN ('sessions', 'messages') "
+        "ORDER BY name", -1, &vm, NULL);
+    if (rc == SQLITE_OK) {
+        SCHEMA_APPEND("\n-- Row counts:\n");
+        while (sqlite3_step(vm) == SQLITE_ROW) {
+            const char *tname = (const char *)sqlite3_column_text(vm, 0);
+            if (!tname) continue;
+            char count_sql[256];
+            snprintf(count_sql, sizeof(count_sql),
+                     "SELECT COUNT(*) FROM \"%s\"", tname);
+            sqlite3_stmt *cnt;
+            if (sqlite3_prepare_v2(db, count_sql, -1, &cnt, NULL) == SQLITE_OK) {
+                if (sqlite3_step(cnt) == SQLITE_ROW)
+                    SCHEMA_APPEND("--   %s: %d rows\n",
+                                  tname, sqlite3_column_int(cnt, 0));
+                sqlite3_finalize(cnt);
+            }
+        }
+        sqlite3_finalize(vm);
+    }
+
+    #undef SCHEMA_APPEND
+    buf[len] = '\0';
+    return buf;
+}
+
+static void cmd_db(const char *arg) {
+    if (!arg || !*arg) {
+        printf("  Usage: /db <path_to_database.db>\n");
+        return;
+    }
+    if (g_userdb) {
+        adam_memory_close(g_userdb);
+        adam_settings_remove_tool(g_settings, "sql_query");
+        g_userdb = NULL;
+    }
+
+    g_userdb = adam_memory_open(arg);
+    if (!g_userdb) {
+        printf("  Failed to open database: %s\n", arg);
+        return;
+    }
+
+    // Read schema and inject as instructions (kept alive — settings stores pointer)
+    static char *db_instructions = NULL;
+    free(db_instructions);
+    char *schema = read_db_schema(g_userdb);
+    if (schema) {
+        size_t instr_len = strlen(schema) + 256;
+        db_instructions = malloc(instr_len);
+        if (db_instructions) {
+            snprintf(db_instructions, instr_len,
+                "You have access to a SQLite database. Use the sql_query tool "
+                "to query it. Here is the database schema:\n%s", schema);
+            adam_settings_set_instructions(g_settings, db_instructions);
+        }
+        printf("  Database schema:\n%s\n", schema);
+        free(schema);
+    }
+
+    // Register sql_query tool pointing to user's database
+    adam_settings_add_tool(g_settings, (adam_tool_def_t){
+        .name = "sql_query",
+        .description = "Execute a SQL query against the connected SQLite database",
+        .parameters_json = "{\"type\":\"object\",\"properties\":"
+                           "{\"sql\":{\"type\":\"string\",\"description\":\"SQL query to execute\"}},"
+                           "\"required\":[\"sql\"]}",
+        .execute = adam_tool_sql_query,
+        .ctx = g_userdb
+    });
+
+    printf("  Database opened: %s\n", arg);
+    printf("  Tool registered: sql_query\n");
+}
+
 static void cmd_memory(const char *arg) {
     if (g_memory) {
         printf("  Memory already enabled.\n");
@@ -566,6 +703,7 @@ static int handle_command(const char *input) {
     if (CMD("evolve"))                  { cmd_evolve(arg); return 1; }
 
 #ifndef ADAM_NO_SQLITE
+    if (CMD("db"))                      { cmd_db(arg); return 1; }
     if (CMD("memory"))                  { cmd_memory(arg); return 1; }
     if (CMD("session"))                 { cmd_session(arg); return 1; }
     if (CMD("sessions"))                { cmd_sessions(); return 1; }
@@ -849,6 +987,7 @@ int main(int argc, char **argv) {
     free(g_image_path);
     if (g_cache) adam_cache_destroy(g_cache);
 #ifndef ADAM_NO_SQLITE
+    if (g_userdb) adam_memory_close(g_userdb);
     if (g_memory) adam_memory_close(g_memory);
 #endif
     adam_history_destroy(g_history);
