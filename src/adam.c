@@ -876,6 +876,7 @@ static const char *build_system_prompt(arena_t *arena, adam_settings_t *s,
     }
 
     // Memory enrichment: search long-term memory and inject relevant results
+#ifndef ADAM_NO_SQLITE
     if (s->inject_memory && s->memory && user_message) {
         adam_memory_result_t *mem_results = NULL;
         size_t mem_count = 0;
@@ -911,6 +912,7 @@ static const char *build_system_prompt(arena_t *arena, adam_settings_t *s,
                 pos += (size_t)snprintf(buf + pos, est - pos, "\n");
         }
     }
+#endif // ADAM_NO_SQLITE
 
     // Date/time injection
     if (s->inject_datetime) {
@@ -1970,3 +1972,49 @@ int adam_pool_active(const adam_pool_t *pool) {
 }
 
 #endif // ADAM_NO_PTHREADS
+
+// ============================================================================
+// MARK: - Net stubs (WASM / no-HTTP builds)
+// ============================================================================
+
+#if defined(ADAM_NO_CURL) && !defined(__APPLE__)
+
+#include "adam_net.h"
+
+void adam_net_cleanup(adam_settings_t *s) { UNUSED_PARAM(s); }
+
+adam_net_response_t adam_net_post_json(
+    adam_settings_t *s, arena_t *arena, const char *url,
+    const char *auth_header, const char *body,
+    const char **extra_headers, int handle_id
+) {
+    UNUSED_PARAM(s); UNUSED_PARAM(arena); UNUSED_PARAM(url);
+    UNUSED_PARAM(auth_header); UNUSED_PARAM(body);
+    UNUSED_PARAM(extra_headers); UNUSED_PARAM(handle_id);
+    return (adam_net_response_t){ .error = ADAM_ERR_CURL };
+}
+
+adam_net_response_t adam_net_post_multipart(
+    adam_settings_t *s, arena_t *arena, const char *url,
+    const char *auth_header, const adam_net_field_t *fields,
+    size_t field_count, int handle_id
+) {
+    UNUSED_PARAM(s); UNUSED_PARAM(arena); UNUSED_PARAM(url);
+    UNUSED_PARAM(auth_header); UNUSED_PARAM(fields);
+    UNUSED_PARAM(field_count); UNUSED_PARAM(handle_id);
+    return (adam_net_response_t){ .error = ADAM_ERR_CURL };
+}
+
+adam_net_response_t adam_net_post_streaming(
+    adam_settings_t *s, const char *url, const char *auth_header,
+    const char *body, const char **extra_headers,
+    adam_net_stream_fn on_chunk, void *stream_ctx, int handle_id
+) {
+    UNUSED_PARAM(s); UNUSED_PARAM(url); UNUSED_PARAM(auth_header);
+    UNUSED_PARAM(body); UNUSED_PARAM(extra_headers);
+    UNUSED_PARAM(on_chunk); UNUSED_PARAM(stream_ctx);
+    UNUSED_PARAM(handle_id);
+    return (adam_net_response_t){ .error = ADAM_ERR_CURL };
+}
+
+#endif // ADAM_NO_CURL && !__APPLE__
