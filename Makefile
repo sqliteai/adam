@@ -150,7 +150,7 @@ endif
 
 .PHONY: all clean test live voice talk chat memory vision deps mbedtls curl llama whisper
 
-all: libadam.a
+all: libadam.a adam
 
 # --- Static library ---
 
@@ -179,6 +179,11 @@ $(SQLITE_VECTOR_DIR)/src/%.o: $(SQLITE_VECTOR_DIR)/src/%.c
 $(SQLITE_MEMORY_DIR)/src/%.o: $(SQLITE_MEMORY_DIR)/src/%.c
 	$(CC) $(DBMEM_CFLAGS) -c $< -o $@
 
+
+# --- CLI ---
+
+adam: libadam.a src/main.c
+	$(CC) $(CFLAGS) -g src/main.c -L. -ladam $(LIBS) $(LDFLAGS) -o $@
 
 # --- Tests ---
 
