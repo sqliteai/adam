@@ -109,6 +109,7 @@ More examples are available in the **[examples/](examples/)** directory:
 | [local-vision](examples/local-vision/) | Image understanding with a local vision model + mmproj |
 | [google-gemini](examples/google-gemini/) | Use Google Gemini models |
 | [image-generation](examples/image-generation/) | Generate images with Gemini |
+| [sqlite-query](examples/sqlite-query/) | Natural language queries on any SQLite database |
 | [structured-json](examples/structured-json/) | Get validated JSON output with retry |
 | [memory](examples/memory/) | Long-term memory with hybrid BM25 + vector search |
 | [sessions](examples/sessions/) | Save and restore conversations |
