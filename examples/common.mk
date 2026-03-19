@@ -50,6 +50,14 @@ else ifeq ($(UNAME_S),Linux)
   LIBS += $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedtls.a
   LIBS += $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedx509.a
   LIBS += $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedcrypto.a
+else
+  # Windows/other: use libcurl + mbedtls
+  CFLAGS  += -I$(ADAM_ROOT)/modules/curl/include -I$(ADAM_ROOT)/modules/mbedtls/include
+  LIBS := $(WHISPER_LIBS) $(LLAMA_LIBS)
+  LIBS += $(ADAM_ROOT)/modules/curl/build/lib/libcurl.a
+  LIBS += $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedtls.a
+  LIBS += $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedx509.a
+  LIBS += $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedcrypto.a
 endif
 
 ADAM_LIB := $(ADAM_ROOT)/libadam.a
