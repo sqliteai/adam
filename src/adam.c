@@ -114,8 +114,6 @@ adam_settings_t *adam_create_settings(void) {
     s->temperature          = 0.7f;
     s->max_tokens           = 4096;
     s->top_p                = 1.0f;
-    s->frequency_penalty    = 0.0f;
-    s->presence_penalty     = 0.0f;
 
     // Agent loop defaults
     s->max_iterations       = 25;

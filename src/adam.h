@@ -431,8 +431,6 @@ struct adam_settings_t {
     int                  max_tokens;         // default: 4096
     const char          *response_format;    // default: NULL (text). "json" for JSON mode
     float                top_p;              // default: 1.0
-    float                frequency_penalty;  // default: 0.0
-    float                presence_penalty;   // default: 0.0
 
     // --- Agent loop settings ---
 
