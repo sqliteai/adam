@@ -94,6 +94,86 @@ static int sse_tok_int(const char *json, const jsmntok_t *tok) {
 }
 
 // ============================================================================
+// MARK: - JSON string unescaping
+// ============================================================================
+
+// Unescape a JSON string value in-place. Returns the new length.
+// Handles: \n \r \t \\ \" \/ \b \f \uXXXX (including surrogate pairs for emoji)
+static uint32_t hex4(const char *s) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) {
+        v <<= 4;
+        char c = s[i];
+        if (c >= '0' && c <= '9') v |= (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') v |= (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v |= (uint32_t)(c - 'A' + 10);
+    }
+    return v;
+}
+
+static size_t utf8_encode(uint32_t cp, char *out) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+static size_t json_unescape(char *buf, size_t len) {
+    size_t r = 0, w = 0;
+    while (r < len) {
+        if (buf[r] == '\\' && r + 1 < len) {
+            r++;
+            switch (buf[r]) {
+            case 'n':  buf[w++] = '\n'; break;
+            case 'r':  buf[w++] = '\r'; break;
+            case 't':  buf[w++] = '\t'; break;
+            case '\\': buf[w++] = '\\'; break;
+            case '"':  buf[w++] = '"';  break;
+            case '/':  buf[w++] = '/';  break;
+            case 'b':  buf[w++] = '\b'; break;
+            case 'f':  buf[w++] = '\f'; break;
+            case 'u': {
+                r++;
+                if (r + 4 > len) { buf[w++] = '?'; break; }
+                uint32_t cp = hex4(buf + r);
+                r += 4;
+                // Handle surrogate pairs (emoji): \uD800-\uDBFF \uDC00-\uDFFF
+                if (cp >= 0xD800 && cp <= 0xDBFF && r + 5 < len
+                    && buf[r] == '\\' && buf[r+1] == 'u') {
+                    uint32_t lo = hex4(buf + r + 2);
+                    if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        r += 6; // skip \uXXXX
+                    }
+                }
+                w += utf8_encode(cp, buf + w);
+                continue; // r already advanced
+            }
+            default:   buf[w++] = buf[r]; break;
+            }
+            r++;
+        } else {
+            buf[w++] = buf[r++];
+        }
+    }
+    buf[w] = '\0';
+    return w;
+}
+
+// ============================================================================
 // MARK: - Process a single SSE data line
 // ============================================================================
 
@@ -132,13 +212,19 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
             for (int i = 1; i < ntok - 1; i++) {
                 if (sse_tok_eq(data, &tokens[i], "text") && tokens[i+1].type == JSMN_STRING) {
                     size_t tlen = (size_t)(tokens[i+1].end - tokens[i+1].start);
-                    const char *text = data + tokens[i+1].start;
+
+                    // Copy and unescape JSON string escapes (\n, \t, \\, etc.)
+                    char *text = malloc(tlen + 1);
+                    if (!text) continue;
+                    memcpy(text, data + tokens[i+1].start, tlen);
+                    text[tlen] = '\0';
+                    tlen = json_unescape(text, tlen);
 
                     // Append to text buffer
                     if (ctx->text_len + tlen >= ctx->text_cap) {
                         size_t new_cap = (ctx->text_cap + tlen) * 2;
                         char *nb = realloc(ctx->text_buf, new_cap);
-                        if (!nb) continue; // skip on OOM
+                        if (!nb) { free(text); continue; }
                         ctx->text_buf = nb;
                         ctx->text_cap = new_cap;
                     }
@@ -150,6 +236,7 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                     if (ctx->settings->on_stream)
                         ctx->settings->on_stream(ctx->settings->stream_ctx,
                                                   text, tlen, 0);
+                    free(text);
                     break;
                 }
                 if (sse_tok_eq(data, &tokens[i], "partial_json") && tokens[i+1].type == JSMN_STRING) {
@@ -243,20 +330,28 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
         }
 
     } else {
-        // OpenAI streaming events:
-        //   {"choices":[{"delta":{"content":"..."},"finish_reason":null}]}
-        //   {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"...","function":{"name":"...","arguments":"..."}}]}}]}
+        // OpenAI / Gemini streaming events:
+        //   OpenAI: {"choices":[{"delta":{"content":"..."},"finish_reason":null}]}
+        //   Gemini: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
         //   {"usage":{"prompt_tokens":N,"completion_tokens":N}}
 
         for (int i = 1; i < ntok - 1; i++) {
-            if (sse_tok_eq(data, &tokens[i], "content") && tokens[i+1].type == JSMN_STRING) {
+            // Match "content" (OpenAI) or "text" (Gemini parts)
+            if ((sse_tok_eq(data, &tokens[i], "content") || sse_tok_eq(data, &tokens[i], "text"))
+                && tokens[i+1].type == JSMN_STRING) {
                 size_t tlen = (size_t)(tokens[i+1].end - tokens[i+1].start);
-                const char *text = data + tokens[i+1].start;
+
+                // Copy and unescape JSON string escapes
+                char *text = malloc(tlen + 1);
+                if (!text) continue;
+                memcpy(text, data + tokens[i+1].start, tlen);
+                text[tlen] = '\0';
+                tlen = json_unescape(text, tlen);
 
                 if (ctx->text_len + tlen >= ctx->text_cap) {
                     size_t new_cap = (ctx->text_cap + tlen) * 2;
                     char *nb = realloc(ctx->text_buf, new_cap);
-                    if (!nb) continue; // skip on OOM
+                    if (!nb) { free(text); continue; }
                     ctx->text_buf = nb;
                     ctx->text_cap = new_cap;
                 }
@@ -267,6 +362,7 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                 if (ctx->settings->on_stream)
                     ctx->settings->on_stream(ctx->settings->stream_ctx,
                                               text, tlen, 0);
+                free(text);
                 break;
             }
 
@@ -340,11 +436,13 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                 break;
             }
 
-            // Usage tokens
-            if (sse_tok_eq(data, &tokens[i], "prompt_tokens") && tokens[i+1].type == JSMN_PRIMITIVE) {
+            // Usage tokens (OpenAI: prompt_tokens/completion_tokens, Gemini: promptTokenCount/candidatesTokenCount)
+            if ((sse_tok_eq(data, &tokens[i], "prompt_tokens") || sse_tok_eq(data, &tokens[i], "promptTokenCount"))
+                && tokens[i+1].type == JSMN_PRIMITIVE) {
                 ctx->input_tokens = sse_tok_int(data, &tokens[i+1]);
             }
-            if (sse_tok_eq(data, &tokens[i], "completion_tokens") && tokens[i+1].type == JSMN_PRIMITIVE) {
+            if ((sse_tok_eq(data, &tokens[i], "completion_tokens") || sse_tok_eq(data, &tokens[i], "candidatesTokenCount"))
+                && tokens[i+1].type == JSMN_PRIMITIVE) {
                 ctx->output_tokens = sse_tok_int(data, &tokens[i+1]);
             }
         }

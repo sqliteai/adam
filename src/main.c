@@ -51,10 +51,20 @@ static char *env_load(const char *key) {
     return NULL;
 }
 
+static int g_stream_started = 0;
+
 static void on_stream(void *ctx, const char *chunk, size_t len, int is_done) {
     UNUSED_PARAM(ctx);
-    if (len > 0) fwrite(chunk, 1, len, stdout);
-    if (is_done) printf("\n");
+    if (len > 0) {
+        if (!g_stream_started) {
+            g_stream_started = 1;
+        }
+        fwrite(chunk, 1, len, stdout);
+    }
+    if (is_done) {
+        printf("\n");
+        g_stream_started = 0;
+    }
     fflush(stdout);
 }
 
@@ -596,7 +606,7 @@ static void run_turn(const char *input) {
                                 img_data, img_len, g_image_path);
             free(img_data);
 
-            printf("[%d] Adam: ", g_turn);
+            printf("[%d] Adam:\n", g_turn);
             fflush(stdout);
 
             adam_run_result_t r = adam_run(g_settings, g_history, NULL);
@@ -622,7 +632,7 @@ static void run_turn(const char *input) {
     // JSON mode: use adam_run_json for this turn
     if (g_settings->response_format &&
         strcmp(g_settings->response_format, "json") == 0) {
-        printf("[%d] Adam (JSON): ", g_turn);
+        printf("[%d] Adam (JSON):\n", g_turn);
         fflush(stdout);
 
         adam_json_result_t r = adam_run_json(g_settings, g_history, input,
@@ -645,7 +655,7 @@ static void run_turn(const char *input) {
     }
 
     // Normal chat turn
-    printf("[%d] Adam: ", g_turn);
+    printf("[%d] Adam:\n", g_turn);
     fflush(stdout);
 
     adam_run_result_t r = adam_run(g_settings, g_history, input);
