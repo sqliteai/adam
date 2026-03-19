@@ -304,6 +304,6 @@ curl: mbedtls
 # --- Clean ---
 
 clean:
-	rm -f $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) libadam.a test_adam test_live test_chat test_memory test_evolve test_voice_interactive test_voice_talk test_tools test_vision
+	rm -f $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) libadam.a adam test_adam test_live test_chat test_memory test_evolve test_voice_interactive test_voice_talk test_tools test_vision
 	rm -f $(SQLITE_VECTOR_OBJS) $(SQLITE_MEMORY_OBJS) $(SQLITE_MEMORY_HTTP_OBJ)
-	rm -rf test_adam.dSYM test_live.dSYM test_voice_interactive.dSYM test_voice_talk.dSYM
+	rm -rf *.dSYM
