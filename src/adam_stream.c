@@ -177,9 +177,15 @@ static size_t json_unescape(char *buf, size_t len) {
 // MARK: - Process a single SSE data line
 // ============================================================================
 
+// #define SSE_DEBUG  // uncomment to dump raw SSE lines
+
 static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) {
     if (data_len == 0) return;
     if (data_len == 6 && memcmp(data, "[DONE]", 6) == 0) return;
+
+#ifdef SSE_DEBUG
+    fprintf(stderr, "[SSE] %.*s\n", (int)data_len, data);
+#endif
 
     // Parse JSON
     jsmntok_t tokens[128];
@@ -527,22 +533,27 @@ adam_llm_response_t adam_llm_call_http_stream(
         return resp;
     }
 
-    // Inject "stream":true into the JSON body
-    // Find the last '}' (closing brace of outermost object)
-    size_t base_len = strlen(base_body);
-    const char *last_brace = strrchr(base_body, '}');
-    if (!last_brace) {
-        resp.error = ADAM_ERR_JSON;
-        resp.error_msg = arena_strdup(arena, "malformed JSON body");
-        return resp;
+    // Inject "stream":true for Anthropic/OpenAI (Gemini uses alt=sse in URL)
+    const char *body;
+    if (s->api_format == ADAM_API_GEMINI) {
+        body = base_body;
+    } else {
+        size_t base_len = strlen(base_body);
+        const char *last_brace = strrchr(base_body, '}');
+        if (!last_brace) {
+            resp.error = ADAM_ERR_JSON;
+            resp.error_msg = arena_strdup(arena, "malformed JSON body");
+            return resp;
+        }
+        size_t prefix_len = (size_t)(last_brace - base_body);
+        char *mbody = arena_alloc(arena, base_len + 32);
+        if (!mbody) { resp.error = ADAM_ERR_ALLOC; return resp; }
+        memcpy(mbody, base_body, prefix_len);
+        size_t pos = prefix_len;
+        pos += (size_t)snprintf(mbody + pos, base_len + 32 - pos, ",\"stream\":true}");
+        mbody[pos] = '\0';
+        body = mbody;
     }
-    size_t prefix_len = (size_t)(last_brace - base_body);
-    char *body = arena_alloc(arena, base_len + 32);
-    if (!body) { resp.error = ADAM_ERR_ALLOC; return resp; }
-    memcpy(body, base_body, prefix_len);
-    size_t pos = prefix_len;
-    pos += (size_t)snprintf(body + pos, base_len + 32 - pos, ",\"stream\":true}");
-    body[pos] = '\0';
 
     // URL
     const char *url = s->base_url;
