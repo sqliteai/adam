@@ -240,21 +240,27 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                     break;
                 }
                 if (sse_tok_eq(data, &tokens[i], "partial_json") && tokens[i+1].type == JSMN_STRING) {
-                    // Accumulate tool call arguments
+                    // Accumulate tool call arguments (unescape JSON string first)
                     if (ctx->tc_current >= 0 && ctx->tc_current < MAX_TOOL_CALLS) {
                         size_t plen = (size_t)(tokens[i+1].end - tokens[i+1].start);
-                        const char *pj = data + tokens[i+1].start;
+                        char *pj = malloc(plen + 1);
+                        if (!pj) continue;
+                        memcpy(pj, data + tokens[i+1].start, plen);
+                        pj[plen] = '\0';
+                        plen = json_unescape(pj, plen);
+
                         size_t idx = (size_t)ctx->tc_current;
                         if (ctx->tool_calls[idx].args_len + plen >= ctx->tool_calls[idx].args_cap) {
                             size_t new_cap = (ctx->tool_calls[idx].args_cap + plen) * 2;
                             char *nb = realloc(ctx->tool_calls[idx].args, new_cap);
-                            if (!nb) continue; // skip on OOM
+                            if (!nb) { free(pj); continue; }
                             ctx->tool_calls[idx].args = nb;
                             ctx->tool_calls[idx].args_cap = new_cap;
                         }
                         memcpy(ctx->tool_calls[idx].args + ctx->tool_calls[idx].args_len, pj, plen);
                         ctx->tool_calls[idx].args_len += plen;
                         ctx->tool_calls[idx].args[ctx->tool_calls[idx].args_len] = '\0';
+                        free(pj);
                     }
                     break;
                 }
@@ -415,19 +421,26 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                         }
                     }
 
-                    // Append arguments
+                    // Append arguments (unescape JSON string escapes)
                     if (tc_args && tc_args_len > 0 && (size_t)idx < MAX_TOOL_CALLS) {
+                        char *unesc = malloc(tc_args_len + 1);
+                        if (!unesc) continue;
+                        memcpy(unesc, tc_args, tc_args_len);
+                        unesc[tc_args_len] = '\0';
+                        tc_args_len = json_unescape(unesc, tc_args_len);
+
                         size_t ci = (size_t)idx;
                         if (ctx->tool_calls[ci].args_len + tc_args_len >= ctx->tool_calls[ci].args_cap) {
                             size_t new_cap = (ctx->tool_calls[ci].args_cap + tc_args_len) * 2;
                             char *nb = realloc(ctx->tool_calls[ci].args, new_cap);
-                            if (!nb) continue; // skip on OOM
+                            if (!nb) { free(unesc); continue; }
                             ctx->tool_calls[ci].args = nb;
                             ctx->tool_calls[ci].args_cap = new_cap;
                         }
-                        memcpy(ctx->tool_calls[ci].args + ctx->tool_calls[ci].args_len, tc_args, tc_args_len);
+                        memcpy(ctx->tool_calls[ci].args + ctx->tool_calls[ci].args_len, unesc, tc_args_len);
                         ctx->tool_calls[ci].args_len += tc_args_len;
                         ctx->tool_calls[ci].args[ctx->tool_calls[ci].args_len] = '\0';
+                        free(unesc);
                     }
 
                     // Skip to next array element

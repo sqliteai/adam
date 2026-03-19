@@ -47,6 +47,8 @@ adam_llm_response_t adam_llm_call_http(
         return resp;
     }
 
+
+
     // Determine URL
     const char *url = s->base_url;
     char *gemini_url = NULL;
