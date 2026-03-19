@@ -422,6 +422,7 @@ struct adam_settings_t {
     int                  local_gpu_layers;   // default: -1 (all layers on GPU)
     int                  local_ctx_size;     // default: 0 (use model default)
     int                  local_batch_size;   // default: 512
+    int                  local_verbose;      // default: 0 (1 = show llama.cpp/ggml log output)
 #endif
 
     // --- Generation parameters ---

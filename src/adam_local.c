@@ -14,6 +14,20 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+// ============================================================================
+// MARK: - Log suppression
+// ============================================================================
+
+static void adam_llama_log_callback(enum ggml_log_level level, const char *text,
+                                     void *user_data) {
+    const adam_settings_t *s = (const adam_settings_t *)user_data;
+    if (s && !s->local_verbose) return;
+    UNUSED_PARAM(level);
+    fputs(text, stderr);
+}
 
 // ============================================================================
 // MARK: - Local context (persistent across turns)
@@ -537,6 +551,23 @@ adam_llm_response_t adam_llm_call_local(
     const adam_tool_def_t *tools, size_t tool_count
 ) {
     adam_llm_response_t resp = {0};
+    int saved_fd = -1;
+
+    // Suppress llama.cpp/ggml stderr noise unless local_verbose is set.
+    // We also install a log callback, but due to duplicate static logger
+    // state across ggml compilation units, some messages bypass it —
+    // so we redirect stderr as well.
+    llama_log_set(adam_llama_log_callback, (void *)s);
+    mtmd_log_set(adam_llama_log_callback, (void *)s);
+    if (!s->local_verbose) {
+        fflush(stderr);
+        saved_fd = dup(STDERR_FILENO);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+    }
 
     // Lazy-init the llama.cpp context on first call
     if (!s->_local_ctx) {
@@ -544,7 +575,7 @@ adam_llm_response_t adam_llm_call_local(
         if (!s->_local_ctx) {
             resp.error = ADAM_ERR_LOCAL;
             resp.error_msg = arena_strdup(arena, "failed to init local model");
-            return resp;
+            goto done;
         }
     }
 
@@ -559,16 +590,26 @@ adam_llm_response_t adam_llm_call_local(
                 resp.error = ADAM_ERR_LOCAL;
                 resp.error_msg = arena_strdup(arena,
                     "failed to init vision model");
-                return resp;
+                goto done;
             }
         }
-        return call_local_vision(arena, s, lctx,
+        resp = call_local_vision(arena, s, lctx,
             (mtmd_context *)s->_mtmd_ctx,
             msgs, msg_count, tools, tool_count);
+        goto done;
     }
 
     // Text-only path
-    return call_local_text(arena, s, lctx, msgs, msg_count, tools, tool_count);
+    resp = call_local_text(arena, s, lctx, msgs, msg_count, tools, tool_count);
+
+done:
+    // Restore stderr if it was suppressed
+    if (saved_fd >= 0) {
+        fflush(stderr);
+        dup2(saved_fd, STDERR_FILENO);
+        close(saved_fd);
+    }
+    return resp;
 }
 
 // ============================================================================
