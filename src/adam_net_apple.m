@@ -296,7 +296,8 @@ adam_net_response_t adam_net_post_streaming(
 
         NSURLSessionConfiguration *config =
             [NSURLSessionConfiguration defaultSessionConfiguration];
-        config.timeoutIntervalForRequest = 30.0;
+        config.timeoutIntervalForRequest = 30.0;  // idle timeout (resets on each chunk)
+        config.timeoutIntervalForResource = 0;    // no total timeout for SSE streaming
         NSURLSession *session =
             [NSURLSession sessionWithConfiguration:config
                                           delegate:delegate

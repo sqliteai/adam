@@ -396,6 +396,13 @@ typedef struct {
 //
 // Defaults are documented inline. Fields marked [required] must be set
 // before calling adam_run().
+//
+// THREAD SAFETY: A settings struct is NOT thread-safe. It contains mutable
+// internal state (_local_ctx, _curl_*, _rate_*) that is modified during
+// adam_run(). Each thread or concurrent agent MUST use its own settings
+// instance. The thread pool (adam_pool_t) enforces this by requiring a
+// separate settings per job. Sharing a settings struct across threads
+// will cause data races and undefined behavior.
 
 struct adam_settings_t {
 

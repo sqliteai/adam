@@ -45,6 +45,8 @@ Clean up all global state. Call once at program exit.
 
 All settings have sensible defaults. Create with `adam_create_settings()`, modify what you need, pass to `adam_run()`.
 
+**Thread safety:** A settings struct is **not thread-safe**. It contains mutable internal state (llama.cpp context, curl handles, rate limiter counters) that is modified during `adam_run()`. Each concurrent agent must use its own settings instance. The thread pool (`adam_pool_t`) enforces this by requiring a separate settings per job.
+
 ```c
 adam_settings_t *adam_create_settings(void);
 ```
