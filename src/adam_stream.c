@@ -455,6 +455,59 @@ static void sse_process_line(sse_ctx_t *ctx, const char *data, size_t data_len) 
                 break;
             }
 
+            // Gemini tool calls: "functionCall":{"name":"...","args":{...}}
+            if (sse_tok_eq(data, &tokens[i], "functionCall") && tokens[i+1].type == JSMN_OBJECT) {
+                const char *fc_name = NULL;
+                char nbuf[128];
+                int fc_obj_size = tokens[i+1].size;
+                int fc_args_start = -1, fc_args_end = -1;
+                int m = i + 2;
+                for (int f = 0; f < fc_obj_size && m < ntok - 1; f++) {
+                    if (sse_tok_eq(data, &tokens[m], "name") && tokens[m+1].type == JSMN_STRING) {
+                        fc_name = sse_tok_str(data, &tokens[m+1], nbuf, sizeof(nbuf));
+                        m += 2;
+                    } else if (sse_tok_eq(data, &tokens[m], "args")) {
+                        fc_args_start = tokens[m+1].start;
+                        fc_args_end = tokens[m+1].end;
+                        // Skip past the args object/value
+                        m++;
+                        int depth = 1;
+                        while (m < ntok && depth > 0) {
+                            if (tokens[m].type == JSMN_OBJECT || tokens[m].type == JSMN_ARRAY)
+                                depth += tokens[m].size;
+                            depth--;
+                            m++;
+                        }
+                    } else {
+                        m += 2;
+                    }
+                }
+
+                if (fc_name && ctx->tc_count < MAX_TOOL_CALLS) {
+                    size_t idx = ctx->tc_count++;
+                    // Gemini has no tool call IDs — generate one
+                    char id_buf[32];
+                    snprintf(id_buf, sizeof(id_buf), "gemini_%zu", idx);
+                    ctx->tool_calls[idx].id = strdup(id_buf);
+                    ctx->tool_calls[idx].name = strdup(fc_name);
+                    if (fc_args_start >= 0 && fc_args_end > fc_args_start) {
+                        size_t alen = (size_t)(fc_args_end - fc_args_start);
+                        ctx->tool_calls[idx].args = malloc(alen + 1);
+                        if (ctx->tool_calls[idx].args) {
+                            memcpy(ctx->tool_calls[idx].args, data + fc_args_start, alen);
+                            ctx->tool_calls[idx].args[alen] = '\0';
+                            ctx->tool_calls[idx].args_len = alen;
+                            ctx->tool_calls[idx].args_cap = alen + 1;
+                        }
+                    } else {
+                        ctx->tool_calls[idx].args = strdup("{}");
+                        ctx->tool_calls[idx].args_len = 2;
+                        ctx->tool_calls[idx].args_cap = 3;
+                    }
+                }
+                break;
+            }
+
             // Usage tokens (OpenAI: prompt_tokens/completion_tokens, Gemini: promptTokenCount/candidatesTokenCount)
             if ((sse_tok_eq(data, &tokens[i], "prompt_tokens") || sse_tok_eq(data, &tokens[i], "promptTokenCount"))
                 && tokens[i+1].type == JSMN_PRIMITIVE) {

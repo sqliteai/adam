@@ -162,16 +162,57 @@ static mtmd_context *vision_init(const adam_settings_t *s,
 
 // Convert adam messages to llama_chat_message array, optionally injecting
 // media markers for user messages with image attachments (vision path).
+// Build a tool definition block to inject into the system prompt.
+// Uses a generic format that most instruction-tuned models understand.
+static char *build_tool_prompt(arena_t *arena,
+                                const adam_tool_def_t *tools,
+                                size_t tool_count) {
+    if (!tools || tool_count == 0) return NULL;
+
+    size_t est = 512;
+    for (size_t i = 0; i < tool_count; i++)
+        est += (tools[i].parameters_json ? strlen(tools[i].parameters_json) : 16)
+             + (tools[i].description ? strlen(tools[i].description) : 0) + 128;
+
+    char *buf = arena_alloc(arena, est);
+    if (!buf) return NULL;
+    size_t pos = 0;
+
+    pos += (size_t)snprintf(buf + pos, est - pos,
+        "\n\nYou have access to the following tools:\n\n");
+
+    for (size_t i = 0; i < tool_count; i++) {
+        pos += (size_t)snprintf(buf + pos, est - pos,
+            "- %s: %s\n  Parameters: %s\n",
+            tools[i].name,
+            tools[i].description ? tools[i].description : "",
+            tools[i].parameters_json ? tools[i].parameters_json : "{}");
+    }
+
+    pos += (size_t)snprintf(buf + pos, est - pos,
+        "\nTo call a tool, output EXACTLY this format on its own line:\n"
+        "<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>\n"
+        "Wait for the tool result before continuing.\n");
+
+    return buf;
+}
+
 static char *build_chat_prompt_impl(arena_t *arena,
+                                     const struct llama_model *model,
                                      const adam_message_t *msgs,
                                      size_t msg_count,
-                                     int inject_markers) {
+                                     int inject_markers,
+                                     const adam_tool_def_t *tools,
+                                     size_t tool_count) {
+    // Get the model's native chat template
+    const char *tmpl = llama_model_chat_template(model, NULL);
     struct llama_chat_message *chat = arena_alloc(arena,
         msg_count * sizeof(struct llama_chat_message));
     if (!chat) return NULL;
 
     const char *marker = inject_markers ? mtmd_default_marker() : NULL;
     size_t marker_len = marker ? strlen(marker) : 0;
+    char *tool_prompt = build_tool_prompt(arena, tools, tool_count);
 
     for (size_t i = 0; i < msg_count; i++) {
         switch (msgs[i].role) {
@@ -179,6 +220,20 @@ static char *build_chat_prompt_impl(arena_t *arena,
         case ADAM_ROLE_ASSISTANT: chat[i].role = "assistant";  break;
         case ADAM_ROLE_TOOL:      chat[i].role = "tool";       break;
         default:                 chat[i].role = "user";        break;
+        }
+
+        // Append tool definitions to system message
+        if (msgs[i].role == ADAM_ROLE_SYSTEM && tool_prompt) {
+            const char *orig = msgs[i].content ? msgs[i].content : "";
+            size_t olen = strlen(orig);
+            size_t tlen = strlen(tool_prompt);
+            char *buf = arena_alloc(arena, olen + tlen + 1);
+            if (!buf) return NULL;
+            memcpy(buf, orig, olen);
+            memcpy(buf + olen, tool_prompt, tlen);
+            buf[olen + tlen] = '\0';
+            chat[i].content = buf;
+            continue;
         }
 
         // For vision: prepend media markers to user messages with images
@@ -213,7 +268,7 @@ static char *build_chat_prompt_impl(arena_t *arena,
     }
 
     // Apply chat template
-    int32_t needed = llama_chat_apply_template(NULL, chat, msg_count,
+    int32_t needed = llama_chat_apply_template(tmpl, chat, msg_count,
                                                 true, NULL, 0);
     if (needed <= 0) {
         // Fallback: concatenate messages manually (ChatML-like)
@@ -234,7 +289,7 @@ static char *build_chat_prompt_impl(arena_t *arena,
 
     char *buf = arena_alloc(arena, (size_t)needed + 1);
     if (!buf) return NULL;
-    llama_chat_apply_template(NULL, chat, msg_count, true, buf, needed + 1);
+    llama_chat_apply_template(tmpl, chat, msg_count, true, buf, needed + 1);
     buf[needed] = '\0';
     return buf;
 }
@@ -251,6 +306,127 @@ static int has_image_attachments(const adam_message_t *msgs, size_t msg_count) {
         }
     }
     return 0;
+}
+
+// ============================================================================
+// MARK: - Parse tool calls from local model text output
+// ============================================================================
+
+// Models output tool calls as: <tool_call>{"name":"...","arguments":{...}}</tool_call>
+// This parser extracts them and strips the tags from the content.
+static size_t parse_local_tool_calls(arena_t *arena, const char *text,
+                                      adam_tool_call_t **out_calls,
+                                      char **out_clean_text) {
+    if (!text) return 0;
+
+    const char *tag_open = "<tool_call>";
+    const char *tag_close = "</tool_call>";
+    size_t open_len = 11, close_len = 12;
+
+    // Count tool calls
+    size_t count = 0;
+    const char *p = text;
+    while ((p = strstr(p, tag_open))) { count++; p += open_len; }
+    if (count == 0) return 0;
+
+    adam_tool_call_t *calls = arena_alloc(arena, count * sizeof(adam_tool_call_t));
+    if (!calls) return 0;
+
+    // Build clean text (without tool_call tags) and extract calls
+    size_t tlen = strlen(text);
+    char *clean = arena_alloc(arena, tlen + 1);
+    if (!clean) return 0;
+    size_t cpos = 0, tc_idx = 0;
+
+    p = text;
+    while (*p) {
+        const char *start = strstr(p, tag_open);
+        if (!start) {
+            size_t rem = strlen(p);
+            memcpy(clean + cpos, p, rem);
+            cpos += rem;
+            break;
+        }
+        // Copy text before the tag
+        if (start > p) {
+            size_t pre = (size_t)(start - p);
+            memcpy(clean + cpos, p, pre);
+            cpos += pre;
+        }
+
+        const char *json_start = start + open_len;
+        const char *end = strstr(json_start, tag_close);
+        if (!end) {
+            // Unclosed tag — copy the rest as-is
+            size_t rem = strlen(start);
+            memcpy(clean + cpos, start, rem);
+            cpos += rem;
+            break;
+        }
+
+        // Parse the JSON between tags: {"name":"...","arguments":{...}}
+        size_t json_len = (size_t)(end - json_start);
+        // Find "name" and "arguments" manually (avoid jsmn dependency)
+        const char *name_key = "\"name\"";
+        const char *args_key = "\"arguments\"";
+        const char *nk = memmem(json_start, json_len, name_key, 6);
+        const char *ak = memmem(json_start, json_len, args_key, 11);
+
+        if (nk && tc_idx < count) {
+            // Extract name: find the string value after "name":
+            const char *nv = nk + 6;
+            while (nv < end && *nv != '"') nv++;
+            if (nv < end) {
+                nv++; // skip opening quote
+                const char *ne = nv;
+                while (ne < end && *ne != '"') ne++;
+                size_t nlen = (size_t)(ne - nv);
+                char *name = arena_alloc(arena, nlen + 1);
+                if (name) { memcpy(name, nv, nlen); name[nlen] = '\0'; }
+
+                // Generate ID
+                char id_buf[32];
+                snprintf(id_buf, sizeof(id_buf), "local_%zu", tc_idx);
+
+                calls[tc_idx].id = arena_strdup(arena, id_buf);
+                calls[tc_idx].name = name;
+
+                // Extract arguments: everything from { to matching }
+                if (ak) {
+                    const char *av = ak + 11;
+                    while (av < end && *av != '{') av++;
+                    if (av < end) {
+                        int depth = 0;
+                        const char *ae = av;
+                        do {
+                            if (*ae == '{') depth++;
+                            else if (*ae == '}') depth--;
+                            ae++;
+                        } while (ae < end && depth > 0);
+                        size_t alen = (size_t)(ae - av);
+                        char *args = arena_alloc(arena, alen + 1);
+                        if (args) { memcpy(args, av, alen); args[alen] = '\0'; }
+                        calls[tc_idx].arguments_json = args;
+                    } else {
+                        calls[tc_idx].arguments_json = arena_strdup(arena, "{}");
+                    }
+                } else {
+                    calls[tc_idx].arguments_json = arena_strdup(arena, "{}");
+                }
+                tc_idx++;
+            }
+        }
+        p = end + close_len;
+    }
+
+    clean[cpos] = '\0';
+    // Trim trailing whitespace
+    while (cpos > 0 && (clean[cpos-1] == ' ' || clean[cpos-1] == '\n'))
+        clean[--cpos] = '\0';
+
+    *out_calls = calls;
+    *out_clean_text = clean;
+    return tc_idx;
 }
 
 // ============================================================================
@@ -302,10 +478,13 @@ static mtmd_bitmap **collect_bitmaps(mtmd_context *vctx,
 // MARK: - Token generation (shared between text-only and vision paths)
 // ============================================================================
 
+// When has_tools is true, output is buffered (no streaming) so we can
+// parse tool calls from the complete text before showing it to the user.
 static adam_llm_response_t generate_tokens(arena_t *arena,
                                             adam_settings_t *s,
                                             adam_local_ctx_t *lctx,
-                                            int n_prompt_tokens) {
+                                            int n_prompt_tokens,
+                                            int has_tools) {
     adam_llm_response_t resp = {0};
     resp.input_tokens = n_prompt_tokens;
 
@@ -331,10 +510,17 @@ static adam_llm_response_t generate_tokens(arena_t *arena,
         if (llama_vocab_is_eog(lctx->vocab, new_token))
             break;
 
+        // Detect special tokens before rendering — check with special=true
+        char spec[64];
+        int sn = llama_token_to_piece(lctx->vocab, new_token,
+                                       spec, sizeof(spec), 0, true);
+        if (sn >= 3 && spec[0] == '<' && (spec[1] == '|' || spec[1] == '/'))
+            break; // stop on <|im_end|>, </s>, <end_of_turn>, etc.
+
         char piece[256];
         int n = llama_token_to_piece(lctx->vocab, new_token,
-                                      piece, sizeof(piece), 0, true);
-        if (n < 0) break;
+                                      piece, sizeof(piece), 0, false);
+        if (n <= 0) break;
 
         if (out_len + (size_t)n >= out_cap) {
             out_cap *= 2;
@@ -347,7 +533,7 @@ static adam_llm_response_t generate_tokens(arena_t *arena,
         out_len += (size_t)n;
         n_generated++;
 
-        if (s->on_stream)
+        if (s->on_stream && !has_tools)
             s->on_stream(s->stream_ctx, piece, (size_t)n, 0);
 
         if (s->abort_flag) break;
@@ -357,7 +543,7 @@ static adam_llm_response_t generate_tokens(arena_t *arena,
     }
 
     output[out_len] = '\0';
-    if (s->on_stream)
+    if (s->on_stream && !has_tools)
         s->on_stream(s->stream_ctx, "", 0, 1);
 
     resp.content = output;
@@ -371,11 +557,13 @@ static adam_llm_response_t generate_tokens(arena_t *arena,
 
 static adam_llm_response_t call_local_text(
     arena_t *arena, adam_settings_t *s, adam_local_ctx_t *lctx,
-    const adam_message_t *msgs, size_t msg_count
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
 ) {
     adam_llm_response_t resp = {0};
 
-    char *prompt = build_chat_prompt_impl(arena, msgs, msg_count, 0);
+    char *prompt = build_chat_prompt_impl(arena, lctx->model, msgs, msg_count,
+                                           0, tools, tool_count);
     if (!prompt) {
         resp.error = ADAM_ERR_LOCAL;
         resp.error_msg = arena_strdup(arena, "failed to build prompt");
@@ -414,7 +602,27 @@ static adam_llm_response_t call_local_text(
         }
     }
 
-    return generate_tokens(arena, s, lctx, n_prompt);
+    resp = generate_tokens(arena, s, lctx, n_prompt, tool_count > 0);
+
+    // Parse tool calls from the model's text output
+    if (resp.error == ADAM_OK && resp.content && tool_count > 0) {
+        adam_tool_call_t *calls = NULL;
+        char *clean_text = NULL;
+        size_t n_calls = parse_local_tool_calls(arena, resp.content,
+                                                 &calls, &clean_text);
+        if (n_calls > 0) {
+            resp.tool_calls = calls;
+            resp.tool_call_count = n_calls;
+            resp.content = clean_text;
+        } else if (s->on_stream) {
+            // No tool calls — send the buffered text to the stream
+            s->on_stream(s->stream_ctx, resp.content,
+                          strlen(resp.content), 0);
+            s->on_stream(s->stream_ctx, "", 0, 1);
+        }
+    }
+
+    return resp;
 }
 
 // ============================================================================
@@ -424,12 +632,14 @@ static adam_llm_response_t call_local_text(
 static adam_llm_response_t call_local_vision(
     arena_t *arena, adam_settings_t *s, adam_local_ctx_t *lctx,
     mtmd_context *vctx,
-    const adam_message_t *msgs, size_t msg_count
+    const adam_message_t *msgs, size_t msg_count,
+    const adam_tool_def_t *tools, size_t tool_count
 ) {
     adam_llm_response_t resp = {0};
 
     // Build prompt with media markers
-    char *prompt = build_chat_prompt_impl(arena, msgs, msg_count, 1);
+    char *prompt = build_chat_prompt_impl(arena, lctx->model, msgs, msg_count,
+                                           1, tools, tool_count);
     if (!prompt) {
         resp.error = ADAM_ERR_LOCAL;
         resp.error_msg = arena_strdup(arena, "failed to build vision prompt");
@@ -492,7 +702,7 @@ static adam_llm_response_t call_local_vision(
         return resp;
     }
 
-    return generate_tokens(arena, s, lctx, (int)n_tokens);
+    return generate_tokens(arena, s, lctx, (int)n_tokens, tool_count > 0);
 }
 
 // ============================================================================
@@ -504,9 +714,6 @@ adam_llm_response_t adam_llm_call_local(
     const adam_message_t *msgs, size_t msg_count,
     const adam_tool_def_t *tools, size_t tool_count
 ) {
-    UNUSED_PARAM(tools);
-    UNUSED_PARAM(tool_count);
-
     adam_llm_response_t resp = {0};
     int saved_fd = -1;
 
@@ -543,11 +750,12 @@ adam_llm_response_t adam_llm_call_local(
         stderr_restore(saved_fd);
         return call_local_vision(arena, s, lctx,
             (mtmd_context *)s->_mtmd_ctx,
-            msgs, msg_count);
+            msgs, msg_count, tools, tool_count);
     }
 
     stderr_restore(saved_fd);
-    return call_local_text(arena, s, lctx, msgs, msg_count);
+    return call_local_text(arena, s, lctx, msgs, msg_count,
+                            tools, tool_count);
 }
 
 // ============================================================================
