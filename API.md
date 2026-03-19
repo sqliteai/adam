@@ -74,6 +74,12 @@ adam_status_t adam_settings_set_local(adam_settings_t *s,
 ```
 Configure local GGUF inference via llama.cpp. Overrides remote API when set. `gpu_layers=-1` for all layers on GPU. `ctx_size=0` for model default. Requires `!ADAM_NO_LOCAL`.
 
+```c
+adam_status_t adam_settings_set_mmproj(adam_settings_t *s,
+    const char *mmproj_path);
+```
+Set the multimodal projector GGUF for local vision models. When set, image attachments on user messages are processed through the vision encoder (via llama.cpp's mtmd library) before being fed to the LLM. The vision path activates automatically when `mmproj_path` is set and the conversation contains image attachments; text-only messages use the standard text path. Compatible with any vision model supported by llama.cpp (Gemma 3, LLaVA, MiniCPM-V, Qwen-VL, etc.). Requires `!ADAM_NO_LOCAL`.
+
 ### System Prompt
 
 ```c
@@ -194,6 +200,11 @@ Key fields you can set directly on `adam_settings_t`:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `gguf_path` | `const char *` | NULL | Local GGUF model path (enables local inference) |
+| `mmproj_path` | `const char *` | NULL | Multimodal projector GGUF for vision |
+| `local_gpu_layers` | `int` | -1 | GPU layers (-1 = all) |
+| `local_ctx_size` | `int` | 0 | Context window (0 = model default) |
+| `local_batch_size` | `int` | 512 | Prompt batch size |
 | `temperature` | `float` | 0.7 | Generation temperature |
 | `max_tokens` | `int` | 4096 | Max output tokens |
 | `response_format` | `const char *` | NULL | "json" for JSON mode |

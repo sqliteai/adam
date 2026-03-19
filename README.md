@@ -41,6 +41,7 @@ make test    # run 161 tests (ASan + UBSan)
 |---------|-------------|
 | **Agent loop** | Tool calling with automatic iteration until final response |
 | **Three providers** | Anthropic, OpenAI, Google Gemini + any compatible API + local GGUF via llama.cpp |
+| **Local vision** | Multimodal image understanding via llama.cpp + mmproj (Gemma 3, LLaVA, etc.) |
 | **Image generation** | Native image output via Gemini image models (gemini-3.1-flash-image-preview) |
 | **13 built-in tools** | File I/O, shell, calculator, SQL, web fetch/search, HTTP POST, memory, research, multi-agent |
 | **Long-term memory** | Hybrid BM25 + vector search via SQLite (sqlite-memory + sqlite-vector) |
@@ -67,6 +68,7 @@ make all           # Build libadam.a
 make test          # Build & run unit tests (ASan + UBSan)
 make chat          # Interactive text chat (cloud API)
 make chat GGUF=models/model.gguf  # Interactive text chat (local)
+make vision GGUF=models/model.gguf MMPROJ=models/mmproj.gguf  # Local vision test
 make talk          # Voice agent (cloud)
 make talk LOCAL=1  # Voice agent (fully local)
 make memory        # Memory system tests
@@ -140,7 +142,26 @@ adam_run_result_t r = adam_run(s, h, "Write a haiku about programming.");
 printf("%s\n", r.final_response);
 ```
 
-### 4. Google Gemini
+### 4. Local Vision (Multimodal)
+
+```c
+adam_settings_t *s = adam_create_settings();
+adam_settings_set_local(s, "models/gemma-3-4b-it-Q4_K_S.gguf", -1, 8192);
+adam_settings_set_mmproj(s, "models/mmproj-gemma-3-4b-it-F16.gguf");
+
+// Load an image and attach it to the conversation
+adam_history_t *h = adam_history_create();
+adam_history_append_user(h, "Describe this image in detail.");
+
+uint8_t *img = read_file("photo.jpg", &img_len);
+adam_history_attach(h, ADAM_MEDIA_IMAGE_JPEG, img, img_len, "photo.jpg");
+
+adam_run_result_t r = adam_run(s, h, NULL);  // NULL: message already in history
+printf("%s\n", r.final_response);
+// Works with any vision model: Gemma 3, LLaVA, MiniCPM-V, Qwen-VL, etc.
+```
+
+### 5. Google Gemini
 
 ```c
 adam_settings_t *s = adam_create_settings();
@@ -154,7 +175,7 @@ printf("%s\n", r.final_response);
 // Works with all Gemini models: 2.5-pro, 2.5-flash, 2.0-flash, 1.5-pro, etc.
 ```
 
-### 5. Image Generation (Gemini)
+### 6. Image Generation (Gemini)
 
 ```c
 adam_settings_t *s = adam_create_settings();
@@ -173,7 +194,7 @@ adam_run_result_t r = adam_run(s, h, "Draw a cute cat wearing a tiny hat");
 printf("%s\n", r.final_response);
 ```
 
-### 6. Structured JSON Output
+### 7. Structured JSON Output
 
 ```c
 adam_settings_t *s = adam_create_settings();
@@ -193,7 +214,7 @@ if (r.json_valid) {
 adam_json_result_free(&r);
 ```
 
-### 7. Long-Term Memory
+### 8. Long-Term Memory
 
 ```c
 // Open memory database
@@ -215,7 +236,7 @@ adam_run_result_t r = adam_run(s, h, "What does the user prefer for UI theme?");
 adam_memory_close(mem);
 ```
 
-### 8. Session Persistence
+### 9. Session Persistence
 
 ```c
 adam_memory_t *mem = adam_memory_open("sessions.db");
@@ -240,7 +261,7 @@ adam_session_load(mem, session_id, h2);
 // h2 now contains the full conversation history
 ```
 
-### 9. Streaming Responses
+### 10. Streaming Responses
 
 ```c
 void on_token(void *ctx, const char *chunk, size_t len, int is_done) {
@@ -257,7 +278,7 @@ adam_run(s, h, "Write a short story about a robot.");
 // Tokens stream to stdout in real-time
 ```
 
-### 10. Voice Agent
+### 11. Voice Agent
 
 ```c
 adam_settings_t *s = adam_create_settings();
@@ -273,7 +294,7 @@ adam_run_result_t r = adam_voice_run(s, h, audio, audio_len, ADAM_AUDIO_WAV);
 // Plays the response aloud via system TTS
 ```
 
-### 11. Multi-Agent Orchestration
+### 12. Multi-Agent Orchestration
 
 ```c
 // Create a specialized researcher agent
@@ -304,7 +325,7 @@ adam_run_result_t r = adam_run(s, h,
 // Main agent delegates to researcher, gets back findings, synthesizes response
 ```
 
-### 12. Evolution Loop (Self-Improving Agent)
+### 13. Evolution Loop (Self-Improving Agent)
 
 ```c
 // Evaluation function: scores each attempt
@@ -331,7 +352,7 @@ printf("Insights:\n%s\n", r.insights);
 adam_evolve_result_free(&r);
 ```
 
-### 13. Research Mode
+### 14. Research Mode
 
 ```c
 adam_settings_t *s = adam_create_settings();
@@ -355,7 +376,7 @@ printf("Found %zu findings across %d iterations\n",
 adam_research_result_free(&r);
 ```
 
-### 14. Built-in Tools with Filesystem Sandbox
+### 15. Built-in Tools with Filesystem Sandbox
 
 ```c
 adam_settings_t *s = adam_create_settings();
@@ -390,7 +411,7 @@ adam_run_result_t r = adam_run(s, h,
 // Attempts to access /etc or ~ will be denied
 ```
 
-### 15. Guardrails
+### 16. Guardrails
 
 ```c
 // Block requests containing sensitive topics
@@ -415,7 +436,7 @@ s->on_after_receive = check_output;
 // If either guardrail denies, adam_run returns ADAM_ERR_GUARDRAIL
 ```
 
-### 16. Response Caching
+### 17. Response Caching
 
 ```c
 adam_cache_t *cache = adam_cache_create(256);  // LRU, max 256 entries
@@ -436,7 +457,7 @@ printf("Hits: %zu, Misses: %zu\n",
 adam_cache_destroy(cache);
 ```
 
-### 17. Thread Pool (Concurrent Agents)
+### 18. Thread Pool (Concurrent Agents)
 
 ```c
 void on_done(void *ctx, adam_run_result_t result) {
@@ -464,7 +485,7 @@ for (int i = 0; i < 10; i++) {
 adam_pool_destroy(pool);  // waits for all jobs to complete
 ```
 
-### 18. Full Agent with Everything
+### 19. Full Agent with Everything
 
 ```c
 adam_init();
