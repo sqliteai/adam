@@ -36,3 +36,24 @@ deps/*/cmake_install.cmake
 deps/*/Makefile
 deps/*/*.a
 test_vision
+
+# Example binaries (name matches directory: examples/foo/foo)
+examples/simple-conversation/simple-conversation
+examples/tool-calling/tool-calling
+examples/local-model/local-model
+examples/local-vision/local-vision
+examples/google-gemini/google-gemini
+examples/image-generation/image-generation
+examples/structured-json/structured-json
+examples/memory/memory
+examples/sessions/sessions
+examples/streaming/streaming
+examples/voice/voice
+examples/multi-agent/multi-agent
+examples/evolution/evolution
+examples/research/research
+examples/filesystem-sandbox/filesystem-sandbox
+examples/guardrails/guardrails
+examples/response-cache/response-cache
+examples/thread-pool/thread-pool
+examples/full-agent/full-agent
