@@ -418,6 +418,7 @@ struct adam_settings_t {
     // is not used. api_format/api_key/base_url are ignored.
 
     const char          *gguf_path;         // default: NULL (set to enable local)
+    const char          *mmproj_path;       // default: NULL (multimodal projector GGUF for vision)
     int                  local_gpu_layers;   // default: -1 (all layers on GPU)
     int                  local_ctx_size;     // default: 0 (use model default)
     int                  local_batch_size;   // default: 512
@@ -587,6 +588,7 @@ struct adam_settings_t {
     // --- Internal state (managed by the library — do not touch) ---
 
     void                *_local_ctx;         // llama.cpp context
+    void                *_mtmd_ctx;          // multimodal context (mtmd)
     int                  _rate_req_count;    // requests in current window
     int                  _rate_tok_count;    // tokens in current window
     int64_t              _rate_window_start; // timestamp of window start (ms)
@@ -634,6 +636,11 @@ adam_status_t   adam_settings_set_base_url(adam_settings_t *s, const char *url);
 // Local GGUF model via llama.cpp. Overrides remote API when set.
 adam_status_t   adam_settings_set_local(adam_settings_t *s,
                     const char *gguf_path, int gpu_layers, int ctx_size);
+
+// Set multimodal projector for local vision models (e.g. Gemma-3, LLaVA).
+// The mmproj_path points to a GGUF file containing the vision encoder.
+adam_status_t   adam_settings_set_mmproj(adam_settings_t *s,
+                    const char *mmproj_path);
 #endif
 
 adam_status_t   adam_settings_set_identity(adam_settings_t *s, const char *text);

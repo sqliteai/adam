@@ -29,7 +29,7 @@ SQLITE_DIR := $(ADAM_ROOT)modules/sqlite
 
 CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -O2
 CFLAGS += -Isrc -I$(MINIAUDIO_DIR) -I$(SQLITE_DIR)
-CFLAGS += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include
+CFLAGS += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include -I$(LLAMA_DIR)/tools/mtmd
 CFLAGS += -I$(WHISPER_DIR)/include
 CFLAGS += -I$(SQLITE_MEMORY_DIR)/src -I$(SQLITE_VECTOR_DIR)/src -I$(SQLITE_VECTOR_DIR)/libs
 
@@ -51,7 +51,8 @@ LDFLAGS := -lpthread -lz
 # Platform-specific: Apple (NSURLSession) vs Other (libcurl + mbedtls)
 # ============================================================================
 
-LLAMA_LIBS := $(LLAMA_BUILD)/src/libllama.a \
+LLAMA_LIBS := $(LLAMA_BUILD)/tools/mtmd/libmtmd.a \
+              $(LLAMA_BUILD)/src/libllama.a \
               $(LLAMA_BUILD)/ggml/src/libggml.a \
               $(LLAMA_BUILD)/ggml/src/libggml-cpu.a \
               $(LLAMA_BUILD)/ggml/src/libggml-base.a
@@ -147,7 +148,7 @@ endif
 # Targets
 # ============================================================================
 
-.PHONY: all clean test live voice talk chat memory deps mbedtls curl llama whisper
+.PHONY: all clean test live voice talk chat memory vision deps mbedtls curl llama whisper
 
 all: libadam.a
 
@@ -239,6 +240,18 @@ test_voice_talk: libadam.a test/test_voice_talk.c
 		test/test_voice_talk.c \
 		-L. -ladam $(LIBS) $(LDFLAGS) -o $@
 
+vision: test_vision
+ifdef MMPROJ
+	./test_vision $(GGUF) $(MMPROJ)
+else
+	./test_vision $(GGUF)
+endif
+
+test_vision: libadam.a test/test_vision.c
+	$(CC) $(CFLAGS) -g \
+		test/test_vision.c \
+		-L. -ladam $(LIBS) $(LDFLAGS) -o $@
+
 # --- Dependencies ---
 
 deps: llama whisper
@@ -251,7 +264,7 @@ llama:
 		-DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF \
 		-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
 		-DCMAKE_BUILD_TYPE=Release
-	cmake --build $(LLAMA_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc) --target llama --target ggml
+	cmake --build $(LLAMA_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc) --target llama --target ggml --target mtmd
 
 whisper:
 	@# whisper.cpp/ggml must be symlinked to llama.cpp/ggml
@@ -286,6 +299,6 @@ curl: mbedtls
 # --- Clean ---
 
 clean:
-	rm -f $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) libadam.a test_adam test_live test_chat test_memory test_evolve test_voice_interactive test_voice_talk test_tools
+	rm -f $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) libadam.a test_adam test_live test_chat test_memory test_evolve test_voice_interactive test_voice_talk test_tools test_vision
 	rm -f $(SQLITE_VECTOR_OBJS) $(SQLITE_MEMORY_OBJS) $(SQLITE_MEMORY_HTTP_OBJ)
 	rm -rf test_adam.dSYM test_live.dSYM test_voice_interactive.dSYM test_voice_talk.dSYM

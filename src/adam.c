@@ -171,8 +171,10 @@ void adam_settings_destroy(adam_settings_t *s) {
     adam_net_cleanup(s);
 #ifndef ADAM_NO_LOCAL
     extern void adam_local_cleanup(adam_settings_t *);
+    extern void adam_local_vision_cleanup(adam_settings_t *);
     extern void adam_stt_local_cleanup(adam_settings_t *);
     adam_local_cleanup(s);
+    adam_local_vision_cleanup(s);
     adam_stt_local_cleanup(s);
 #endif
     free(s->tools);
@@ -210,6 +212,13 @@ adam_status_t adam_settings_set_local(adam_settings_t *s,
     s->gguf_path = gguf_path;
     s->local_gpu_layers = gpu_layers;
     s->local_ctx_size = ctx_size;
+    return ADAM_OK;
+}
+
+adam_status_t adam_settings_set_mmproj(adam_settings_t *s,
+                                       const char *mmproj_path) {
+    if (!s) return ADAM_ERR_INVALID_PARAM;
+    s->mmproj_path = mmproj_path;
     return ADAM_OK;
 }
 #endif

@@ -35,3 +35,4 @@ deps/*/CMakeFiles/
 deps/*/cmake_install.cmake
 deps/*/Makefile
 deps/*/*.a
+test_vision
