@@ -971,8 +971,14 @@ size_t          adam_cache_misses(const adam_cache_t *c);
 // MARK: - Token Estimation
 // ============================================================================
 
-// Rough heuristic: ~4 characters per token (good enough for budgeting).
+// Estimate token count. Uses the local model's tokenizer if loaded,
+// otherwise falls back to ~4 characters per token heuristic.
 size_t          adam_estimate_tokens(const char *text, size_t len);
+
+// Estimate tokens using the local model's actual tokenizer.
+// Returns 0 if no local model is loaded. Available when !ADAM_NO_LOCAL.
+size_t          adam_estimate_tokens_local(const adam_settings_t *s,
+                    const char *text, size_t len);
 
 // ============================================================================
 // MARK: - Evolution Loop (self-improving agent)

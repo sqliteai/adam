@@ -779,4 +779,19 @@ void adam_local_vision_cleanup(adam_settings_t *s) {
     }
 }
 
+// ============================================================================
+// MARK: - Token estimation using local tokenizer
+// ============================================================================
+
+size_t adam_estimate_tokens_local(const adam_settings_t *s,
+                                   const char *text, size_t len) {
+    if (!s || !s->_local_ctx || !text) return 0;
+    adam_local_ctx_t *lctx = (adam_local_ctx_t *)s->_local_ctx;
+    if (len == 0) len = strlen(text);
+    // llama_tokenize with NULL output and 0 max returns negative token count
+    int n = llama_tokenize(lctx->vocab, text, (int32_t)len,
+                            NULL, 0, false, false);
+    return (n < 0) ? (size_t)(-n) : 0;
+}
+
 #endif // ADAM_NO_LOCAL

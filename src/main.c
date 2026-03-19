@@ -841,6 +841,7 @@ static void print_usage(const char *prog) {
     printf("  --temperature <f>  Generation temperature (default: 0.7)\n");
     printf("  --max-tokens <n>   Max output tokens (default: 4096)\n");
     printf("  --identity <text>  System identity prompt\n");
+    printf("  --embedding-model <path>  GGUF embedding model for local memory\n");
     printf("\nType /help during chat for interactive commands.\n");
 }
 
@@ -879,6 +880,8 @@ static int parse_args(int argc, char **argv) {
             s->max_tokens = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--identity") == 0 && i + 1 < argc) {
             adam_settings_set_identity(s, argv[++i]);
+        } else if (strcmp(argv[i], "--embedding-model") == 0 && i + 1 < argc) {
+            s->memory_embedding_model = argv[++i];
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return -1;

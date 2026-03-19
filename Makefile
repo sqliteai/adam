@@ -301,9 +301,29 @@ curl: mbedtls
 		-DMBEDCRYPTO_LIBRARY=$(MBEDTLS_BUILD)/library/libmbedcrypto.a
 	cmake --build $(CURL_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 
+# --- WASM (Emscripten) ---
+
+WASM_SRCS := src/arena.c src/adam.c src/adam_json.c src/adam_http.c \
+             src/adam_stream.c src/adam_evolve.c src/adam_research.c \
+             src/adam_tools.c src/adam_cache.c
+WASM_CFLAGS := -std=c11 -O2 -Isrc \
+               -DADAM_NO_LOCAL -DADAM_NO_CURL -DADAM_NO_PTHREADS \
+               -DADAM_NO_SQLITE -DADAM_NO_VOICE
+
+wasm: adam.js
+
+adam.js: $(WASM_SRCS)
+	emcc $(WASM_CFLAGS) $(WASM_SRCS) \
+		-sEXPORTED_FUNCTIONS='["_adam_init","_adam_cleanup","_adam_create_settings","_adam_settings_destroy","_adam_settings_set_provider","_adam_settings_set_base_url","_adam_settings_set_identity","_adam_settings_set_instructions","_adam_settings_set_http_callback","_adam_settings_add_tool","_adam_history_create","_adam_history_destroy","_adam_history_clear","_adam_history_count","_adam_history_append_user","_adam_run","_adam_run_result_free","_adam_abort","_adam_abort_reset","_malloc","_free"]' \
+		-sEXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8"]' \
+		-sALLOW_MEMORY_GROWTH=1 \
+		-sMODULARIZE=1 -sEXPORT_NAME=AdamModule \
+		-o $@
+
 # --- Clean ---
 
 clean:
 	rm -f $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) libadam.a adam test_adam test_live test_chat test_memory test_evolve test_voice_interactive test_voice_talk test_tools test_vision
 	rm -f $(SQLITE_VECTOR_OBJS) $(SQLITE_MEMORY_OBJS) $(SQLITE_MEMORY_HTTP_OBJ)
 	rm -rf *.dSYM
+	rm -f adam.js adam.wasm

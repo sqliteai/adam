@@ -4,6 +4,8 @@
 *.so
 *.dylib
 *.dSYM/
+adam.js
+adam.wasm
 test_adam
 test_live
 test_chat

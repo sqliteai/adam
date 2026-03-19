@@ -1230,8 +1230,28 @@ adam_run_result_t adam_run(adam_settings_t *s, adam_history_t *history,
         // Smart context window awareness: summarize when approaching limit
         {
             int ctx_window = adam_model_context_window(s->model);
+#ifndef ADAM_NO_LOCAL
+            // For local models, use the configured context size
+            if (ctx_window <= 0 && s->gguf_path)
+                ctx_window = s->local_ctx_size > 0 ? s->local_ctx_size : 4096;
+#endif
             if (ctx_window > 0) {
-                size_t est = adam_history_estimate_tokens(history);
+                // Use local tokenizer for accurate counting when available
+                size_t est = 0;
+#ifndef ADAM_NO_LOCAL
+                if (s->_local_ctx) {
+                    for (size_t hi = 0; hi < history->count; hi++) {
+                        est += adam_estimate_tokens_local(s,
+                            history->items[hi].content,
+                            history->items[hi].content_len);
+                        est += history->items[hi].tool_call_count * 30;
+                    }
+                } else
+#endif
+                {
+                    est = adam_history_estimate_tokens(history);
+                }
+
                 size_t threshold = s->summarize_threshold > 0
                     ? (size_t)s->summarize_threshold
                     : (size_t)(ctx_window * 3 / 4);
