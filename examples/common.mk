@@ -42,17 +42,13 @@ ifeq ($(UNAME_S),Darwin)
   LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
   LDFLAGS += -framework AVFoundation
   LIBS := $(WHISPER_LIBS) $(LLAMA_LIBS)
-else ifeq ($(UNAME_S),Linux)
-  CFLAGS  += -I$(ADAM_ROOT)/modules/curl/include -I$(ADAM_ROOT)/modules/mbedtls/include
-  LDFLAGS += -ldl -lm -lstdc++
-  LIBS := $(WHISPER_LIBS) $(LLAMA_LIBS)
-  LIBS += $(ADAM_ROOT)/modules/curl/build/lib/libcurl.a
-  LIBS += $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedtls.a
-  LIBS += $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedx509.a
-  LIBS += $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedcrypto.a
 else
-  # Windows/other: use libcurl + mbedtls
+  # Linux / Windows / other: use libcurl + mbedtls
   CFLAGS  += -I$(ADAM_ROOT)/modules/curl/include -I$(ADAM_ROOT)/modules/mbedtls/include
+  LDFLAGS += -lstdc++
+  ifeq ($(UNAME_S),Linux)
+    LDFLAGS += -ldl -lm
+  endif
   LIBS := $(WHISPER_LIBS) $(LLAMA_LIBS)
   LIBS += $(ADAM_ROOT)/modules/curl/build/lib/libcurl.a
   LIBS += $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedtls.a

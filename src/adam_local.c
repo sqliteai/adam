@@ -18,6 +18,14 @@
 #include <fcntl.h>
 
 // ============================================================================
+// MARK: - Helpers
+// ============================================================================
+
+static inline int adam_media_is_image(adam_media_type_t type) {
+    return type >= ADAM_MEDIA_IMAGE_PNG && type <= ADAM_MEDIA_IMAGE_WEBP;
+}
+
+// ============================================================================
 // MARK: - Log suppression
 // ============================================================================
 
@@ -27,6 +35,33 @@ static void adam_llama_log_callback(enum ggml_log_level level, const char *text,
     if (s && !s->local_verbose) return;
     UNUSED_PARAM(level);
     fputs(text, stderr);
+}
+
+// Suppress llama.cpp/ggml/mtmd log output. Called once during init.
+// The dup2 redirect is needed because ggml has duplicate static logger
+// state across compilation units — some messages bypass llama_log_set.
+static int stderr_suppress(const adam_settings_t *s) {
+    llama_log_set(adam_llama_log_callback, (void *)s);
+    mtmd_log_set(adam_llama_log_callback, (void *)s);
+    if (!s->local_verbose) {
+        fflush(stderr);
+        int saved_fd = dup(STDERR_FILENO);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        return saved_fd;
+    }
+    return -1;
+}
+
+static void stderr_restore(int saved_fd) {
+    if (saved_fd >= 0) {
+        fflush(stderr);
+        dup2(saved_fd, STDERR_FILENO);
+        close(saved_fd);
+    }
 }
 
 // ============================================================================
@@ -51,10 +86,7 @@ static adam_local_ctx_t *local_init(const adam_settings_t *s) {
 
     struct llama_model *model = llama_model_load_from_file(
         s->gguf_path, mparams);
-    if (!model) {
-        fprintf(stderr, "[adam_local] failed to load model: %s\n", s->gguf_path);
-        return NULL;
-    }
+    if (!model) return NULL;
 
     int n_ctx = s->local_ctx_size > 0 ? s->local_ctx_size : 4096;
     int n_batch = s->local_batch_size > 0 ? s->local_batch_size : 512;
@@ -65,7 +97,6 @@ static adam_local_ctx_t *local_init(const adam_settings_t *s) {
 
     struct llama_context *ctx = llama_init_from_model(model, cparams);
     if (!ctx) {
-        fprintf(stderr, "[adam_local] failed to create context\n");
         llama_model_free(model);
         return NULL;
     }
@@ -115,14 +146,9 @@ static mtmd_context *vision_init(const adam_settings_t *s,
     mparams.print_timings = false;
 
     mtmd_context *ctx = mtmd_init_from_file(s->mmproj_path, model, mparams);
-    if (!ctx) {
-        fprintf(stderr, "[adam_local] failed to load mmproj: %s\n",
-                s->mmproj_path);
-        return NULL;
-    }
+    if (!ctx) return NULL;
 
     if (!mtmd_support_vision(ctx)) {
-        fprintf(stderr, "[adam_local] mmproj does not support vision\n");
         mtmd_free(ctx);
         return NULL;
     }
@@ -131,21 +157,21 @@ static mtmd_context *vision_init(const adam_settings_t *s,
 }
 
 // ============================================================================
-// MARK: - Build prompt using llama_chat_apply_template
+// MARK: - Build chat prompt (shared logic for text and vision)
 // ============================================================================
 
-static char *build_chat_prompt(arena_t *arena,
-                                const struct llama_model *model,
-                                const adam_message_t *msgs, size_t msg_count,
-                                const adam_tool_def_t *tools, size_t tool_count) {
-    UNUSED_PARAM(model);
-    UNUSED_PARAM(tools);
-    UNUSED_PARAM(tool_count);
-
-    // Convert adam messages to llama_chat_message format
+// Convert adam messages to llama_chat_message array, optionally injecting
+// media markers for user messages with image attachments (vision path).
+static char *build_chat_prompt_impl(arena_t *arena,
+                                     const adam_message_t *msgs,
+                                     size_t msg_count,
+                                     int inject_markers) {
     struct llama_chat_message *chat = arena_alloc(arena,
         msg_count * sizeof(struct llama_chat_message));
     if (!chat) return NULL;
+
+    const char *marker = inject_markers ? mtmd_default_marker() : NULL;
+    size_t marker_len = marker ? strlen(marker) : 0;
 
     for (size_t i = 0; i < msg_count; i++) {
         switch (msgs[i].role) {
@@ -154,82 +180,19 @@ static char *build_chat_prompt(arena_t *arena,
         case ADAM_ROLE_TOOL:      chat[i].role = "tool";       break;
         default:                 chat[i].role = "user";        break;
         }
-        chat[i].content = msgs[i].content ? msgs[i].content : "";
-    }
 
-    // First call: determine buffer size needed
-    int32_t needed = llama_chat_apply_template(
-        NULL, /* tmpl = NULL → use model's built-in template */
-        chat, msg_count,
-        true, /* add_ass = true → add assistant prompt start */
-        NULL, 0);
-
-    if (needed <= 0) {
-        // Fallback: concatenate messages manually (ChatML-like)
-        size_t est = 256;
-        for (size_t i = 0; i < msg_count; i++) est += msgs[i].content_len + 64;
-        char *buf = arena_alloc(arena, est);
-        if (!buf) return NULL;
-        size_t pos = 0;
-        for (size_t i = 0; i < msg_count; i++) {
-            pos += (size_t)snprintf(buf + pos, est - pos,
-                "<|im_start|>%s\n%s<|im_end|>\n", chat[i].role, chat[i].content);
-        }
-        pos += (size_t)snprintf(buf + pos, est - pos, "<|im_start|>assistant\n");
-        return buf;
-    }
-
-    // Second call: fill buffer
-    char *buf = arena_alloc(arena, (size_t)needed + 1);
-    if (!buf) return NULL;
-    llama_chat_apply_template(NULL, chat, msg_count, true, buf, needed + 1);
-    buf[needed] = '\0';
-    return buf;
-}
-
-// ============================================================================
-// MARK: - Build prompt with media markers for vision
-// ============================================================================
-
-// Build a chat prompt where user messages with attachments get media markers
-// injected before the text content so mtmd can replace them with image tokens.
-static char *build_chat_prompt_vision(arena_t *arena,
-                                       const struct llama_model *model,
-                                       const adam_message_t *msgs,
-                                       size_t msg_count,
-                                       const adam_tool_def_t *tools,
-                                       size_t tool_count) {
-    UNUSED_PARAM(model);
-    UNUSED_PARAM(tools);
-    UNUSED_PARAM(tool_count);
-
-    const char *marker = mtmd_default_marker();
-
-    struct llama_chat_message *chat = arena_alloc(arena,
-        msg_count * sizeof(struct llama_chat_message));
-    if (!chat) return NULL;
-
-    // We need temp buffers for messages that get markers prepended
-    for (size_t i = 0; i < msg_count; i++) {
-        switch (msgs[i].role) {
-        case ADAM_ROLE_SYSTEM:    chat[i].role = "system";    break;
-        case ADAM_ROLE_ASSISTANT: chat[i].role = "assistant";  break;
-        case ADAM_ROLE_TOOL:      chat[i].role = "tool";       break;
-        default:                 chat[i].role = "user";        break;
-        }
-
-        // For user messages with image attachments, prepend media markers
-        if (msgs[i].role == ADAM_ROLE_USER && msgs[i].attachment_count > 0) {
+        // For vision: prepend media markers to user messages with images
+        if (marker && msgs[i].role == ADAM_ROLE_USER
+            && msgs[i].attachment_count > 0) {
             size_t n_images = 0;
             for (size_t j = 0; j < msgs[i].attachment_count; j++) {
-                if (msgs[i].attachments[j].type <= ADAM_MEDIA_IMAGE_WEBP)
+                if (adam_media_is_image(msgs[i].attachments[j].type))
                     n_images++;
             }
-
             if (n_images > 0) {
                 const char *text = msgs[i].content ? msgs[i].content : "";
-                size_t marker_len = strlen(marker);
-                size_t buf_len = n_images * (marker_len + 1) + strlen(text) + 1;
+                size_t tlen = msgs[i].content ? msgs[i].content_len : 0;
+                size_t buf_len = n_images * (marker_len + 1) + tlen + 1;
                 char *buf = arena_alloc(arena, buf_len);
                 if (!buf) return NULL;
                 size_t pos = 0;
@@ -238,7 +201,6 @@ static char *build_chat_prompt_vision(arena_t *arena,
                     pos += marker_len;
                     buf[pos++] = '\n';
                 }
-                size_t tlen = strlen(text);
                 memcpy(buf + pos, text, tlen);
                 pos += tlen;
                 buf[pos] = '\0';
@@ -254,6 +216,7 @@ static char *build_chat_prompt_vision(arena_t *arena,
     int32_t needed = llama_chat_apply_template(NULL, chat, msg_count,
                                                 true, NULL, 0);
     if (needed <= 0) {
+        // Fallback: concatenate messages manually (ChatML-like)
         size_t est = 256;
         for (size_t i = 0; i < msg_count; i++)
             est += strlen(chat[i].content) + 64;
@@ -283,7 +246,7 @@ static char *build_chat_prompt_vision(arena_t *arena,
 static int has_image_attachments(const adam_message_t *msgs, size_t msg_count) {
     for (size_t i = 0; i < msg_count; i++) {
         for (size_t j = 0; j < msgs[i].attachment_count; j++) {
-            if (msgs[i].attachments[j].type <= ADAM_MEDIA_IMAGE_WEBP)
+            if (adam_media_is_image(msgs[i].attachments[j].type))
                 return 1;
         }
     }
@@ -302,7 +265,7 @@ static mtmd_bitmap **collect_bitmaps(mtmd_context *vctx,
     size_t n_images = 0;
     for (size_t i = 0; i < msg_count; i++) {
         for (size_t j = 0; j < msgs[i].attachment_count; j++) {
-            if (msgs[i].attachments[j].type <= ADAM_MEDIA_IMAGE_WEBP)
+            if (adam_media_is_image(msgs[i].attachments[j].type))
                 n_images++;
         }
     }
@@ -316,13 +279,11 @@ static mtmd_bitmap **collect_bitmaps(mtmd_context *vctx,
     for (size_t i = 0; i < msg_count; i++) {
         for (size_t j = 0; j < msgs[i].attachment_count; j++) {
             adam_attachment_t *att = &msgs[i].attachments[j];
-            if (att->type > ADAM_MEDIA_IMAGE_WEBP) continue;
+            if (!adam_media_is_image(att->type)) continue;
 
             mtmd_bitmap *bmp = mtmd_helper_bitmap_init_from_buf(
                 vctx, att->data, att->data_len);
             if (!bmp) {
-                fprintf(stderr, "[adam_local] failed to decode image %zu\n", idx);
-                // Free already allocated bitmaps
                 for (size_t k = 0; k < idx; k++)
                     mtmd_bitmap_free(bitmaps[k]);
                 free(bitmaps);
@@ -410,13 +371,11 @@ static adam_llm_response_t generate_tokens(arena_t *arena,
 
 static adam_llm_response_t call_local_text(
     arena_t *arena, adam_settings_t *s, adam_local_ctx_t *lctx,
-    const adam_message_t *msgs, size_t msg_count,
-    const adam_tool_def_t *tools, size_t tool_count
+    const adam_message_t *msgs, size_t msg_count
 ) {
     adam_llm_response_t resp = {0};
 
-    char *prompt = build_chat_prompt(arena, lctx->model,
-                                      msgs, msg_count, tools, tool_count);
+    char *prompt = build_chat_prompt_impl(arena, msgs, msg_count, 0);
     if (!prompt) {
         resp.error = ADAM_ERR_LOCAL;
         resp.error_msg = arena_strdup(arena, "failed to build prompt");
@@ -465,14 +424,12 @@ static adam_llm_response_t call_local_text(
 static adam_llm_response_t call_local_vision(
     arena_t *arena, adam_settings_t *s, adam_local_ctx_t *lctx,
     mtmd_context *vctx,
-    const adam_message_t *msgs, size_t msg_count,
-    const adam_tool_def_t *tools, size_t tool_count
+    const adam_message_t *msgs, size_t msg_count
 ) {
     adam_llm_response_t resp = {0};
 
     // Build prompt with media markers
-    char *prompt = build_chat_prompt_vision(arena, lctx->model,
-                                             msgs, msg_count, tools, tool_count);
+    char *prompt = build_chat_prompt_impl(arena, msgs, msg_count, 1);
     if (!prompt) {
         resp.error = ADAM_ERR_LOCAL;
         resp.error_msg = arena_strdup(arena, "failed to build vision prompt");
@@ -499,7 +456,6 @@ static adam_llm_response_t call_local_vision(
         &input_text, (const mtmd_bitmap **)bitmaps, n_bitmaps);
 
     if (tok_res != 0) {
-        fprintf(stderr, "[adam_local] mtmd_tokenize failed: %d\n", tok_res);
         resp.error = ADAM_ERR_LOCAL;
         resp.error_msg = arena_strdup(arena,
             tok_res == 1 ? "image count mismatch with markers"
@@ -531,8 +487,6 @@ static adam_llm_response_t call_local_vision(
     free(bitmaps);
 
     if (eval_res != 0) {
-        fprintf(stderr, "[adam_local] mtmd_helper_eval_chunks failed: %d\n",
-                eval_res);
         resp.error = ADAM_ERR_LOCAL;
         resp.error_msg = arena_strdup(arena, "vision prompt evaluation failed");
         return resp;
@@ -550,32 +504,23 @@ adam_llm_response_t adam_llm_call_local(
     const adam_message_t *msgs, size_t msg_count,
     const adam_tool_def_t *tools, size_t tool_count
 ) {
+    UNUSED_PARAM(tools);
+    UNUSED_PARAM(tool_count);
+
     adam_llm_response_t resp = {0};
     int saved_fd = -1;
 
-    // Suppress llama.cpp/ggml stderr noise unless local_verbose is set.
-    // We also install a log callback, but due to duplicate static logger
-    // state across ggml compilation units, some messages bypass it —
-    // so we redirect stderr as well.
-    llama_log_set(adam_llama_log_callback, (void *)s);
-    mtmd_log_set(adam_llama_log_callback, (void *)s);
-    if (!s->local_verbose) {
-        fflush(stderr);
-        saved_fd = dup(STDERR_FILENO);
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
-    }
-
-    // Lazy-init the llama.cpp context on first call
+    // Suppress logs on first call (model/vision init are the noisy parts).
+    // On subsequent calls the callbacks are already installed and stderr
+    // is only redirected during init — not per-turn.
     if (!s->_local_ctx) {
+        saved_fd = stderr_suppress(s);
         s->_local_ctx = local_init(s);
         if (!s->_local_ctx) {
             resp.error = ADAM_ERR_LOCAL;
             resp.error_msg = arena_strdup(arena, "failed to init local model");
-            goto done;
+            stderr_restore(saved_fd);
+            return resp;
         }
     }
 
@@ -583,33 +528,26 @@ adam_llm_response_t adam_llm_call_local(
 
     // Vision path: if mmproj is set and messages contain images
     if (s->mmproj_path && has_image_attachments(msgs, msg_count)) {
-        // Lazy-init the mtmd context
+        // Lazy-init the mtmd context (also noisy)
         if (!s->_mtmd_ctx) {
+            if (saved_fd < 0) saved_fd = stderr_suppress(s);
             s->_mtmd_ctx = vision_init(s, lctx->model);
             if (!s->_mtmd_ctx) {
                 resp.error = ADAM_ERR_LOCAL;
                 resp.error_msg = arena_strdup(arena,
                     "failed to init vision model");
-                goto done;
+                stderr_restore(saved_fd);
+                return resp;
             }
         }
-        resp = call_local_vision(arena, s, lctx,
+        stderr_restore(saved_fd);
+        return call_local_vision(arena, s, lctx,
             (mtmd_context *)s->_mtmd_ctx,
-            msgs, msg_count, tools, tool_count);
-        goto done;
+            msgs, msg_count);
     }
 
-    // Text-only path
-    resp = call_local_text(arena, s, lctx, msgs, msg_count, tools, tool_count);
-
-done:
-    // Restore stderr if it was suppressed
-    if (saved_fd >= 0) {
-        fflush(stderr);
-        dup2(saved_fd, STDERR_FILENO);
-        close(saved_fd);
-    }
-    return resp;
+    stderr_restore(saved_fd);
+    return call_local_text(arena, s, lctx, msgs, msg_count);
 }
 
 // ============================================================================
