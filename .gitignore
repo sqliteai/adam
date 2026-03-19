@@ -20,6 +20,10 @@ models/
 .env
 *.key
 
+# Project docs (kept outside repo)
+CLAUDE.md
+PLAN.md
+
 # IDE / OS
 .DS_Store
 *.swp
