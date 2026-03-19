@@ -673,6 +673,8 @@ adam_llm_response_t adam_llm_call_http_stream(
         s->on_stream(s->stream_ctx, "", 0, 1);
 
     // Build response from accumulated data
+    resp.http_status = (int)net.http_code;
+
     if (net.error != ADAM_OK) {
         resp.error = net.error;
         resp.error_msg = arena_strdup(arena, "streaming HTTP request failed");

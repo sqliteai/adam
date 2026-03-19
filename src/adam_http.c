@@ -109,19 +109,24 @@ adam_llm_response_t adam_llm_call_http(
     }
 
     // Classify HTTP status and parse response
+    resp.http_status = (int)net.http_code;
+
     if (net.http_code == 429) {
         resp = adam_json_parse_response(arena, s->api_format,
                                         (const char *)net.data, net.data_len);
+        resp.http_status = (int)net.http_code;
         if (resp.error == ADAM_OK) resp.error = ADAM_ERR_RATE_LIMIT;
         if (!resp.error_msg) resp.error_msg = arena_strdup(arena, "rate limited (429)");
     } else if (net.http_code == 401 || net.http_code == 403) {
         resp = adam_json_parse_response(arena, s->api_format,
                                         (const char *)net.data, net.data_len);
+        resp.http_status = (int)net.http_code;
         if (resp.error == ADAM_OK) resp.error = ADAM_ERR_AUTH;
         if (!resp.error_msg) resp.error_msg = arena_strdup(arena, "authentication error");
     } else if (net.http_code >= 400) {
         resp = adam_json_parse_response(arena, s->api_format,
                                         (const char *)net.data, net.data_len);
+        resp.http_status = (int)net.http_code;
         if (resp.error == ADAM_OK) resp.error = ADAM_ERR_PROVIDER;
         if (!resp.error_msg) {
             resp.error_msg = (net.data && net.data_len > 0)
@@ -131,6 +136,7 @@ adam_llm_response_t adam_llm_call_http(
     } else {
         resp = adam_json_parse_response(arena, s->api_format,
                                         (const char *)net.data, net.data_len);
+        resp.http_status = (int)net.http_code;
     }
 
     return resp;

@@ -308,6 +308,11 @@ Free the `final_response` string in the result.
 | `output_tokens` | `int` | Total output tokens generated |
 | `cost_usd` | `float` | Estimated cost in USD |
 | `elapsed_ms` | `double` | Wall-clock time in milliseconds |
+| `http_status` | `int` | HTTP status code on failure (0 for non-HTTP errors) |
+| `retry_after_ms` | `int` | Retry-after hint in ms (0 if not provided) |
+| `provider_error` | `const char *` | Provider-specific error type (e.g. "overloaded") |
+
+The error context fields are populated on failure only. For rate limit errors (429), `http_status` is 429 and embedders can use `retry_after_ms` for smart backoff. For auth errors, `http_status` is 401 or 403. For other provider errors, `http_status` carries the status code and `provider_error` contains the error type from the provider's response JSON if available.
 
 ---
 

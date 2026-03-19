@@ -319,6 +319,7 @@ typedef struct {
     int                  output_tokens;
     adam_status_t        error;             // ADAM_OK if no error
     const char          *error_msg;         // arena-owned (NULL if no error)
+    int                  http_status;       // HTTP status code (0 for non-HTTP errors)
 } adam_llm_response_t;
 
 // ============================================================================
@@ -385,6 +386,11 @@ typedef struct {
     int                  output_tokens;     // total output tokens generated
     float                cost_usd;          // estimated cost ($0.0 for local models)
     double               elapsed_ms;        // wall-clock time for adam_run()
+
+    // Structured error context (populated on failure):
+    int                  http_status;       // HTTP status code (0 if not an HTTP error)
+    int                  retry_after_ms;    // retry-after hint in ms (0 if not provided)
+    const char          *provider_error;    // provider-specific error type (e.g. "overloaded")
 } adam_run_result_t;
 
 // ============================================================================

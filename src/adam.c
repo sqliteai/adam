@@ -1320,6 +1320,7 @@ adam_run_result_t adam_run(adam_settings_t *s, adam_history_t *history,
                 continue;
             }
             result.status = resp.error;
+            result.http_status = resp.http_status;
             result.final_response = resp.error_msg
                 ? strdup(resp.error_msg) : strdup(adam_status_string(resp.error));
             if (s->on_error) {
