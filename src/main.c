@@ -18,6 +18,7 @@
 #include <string.h>
 #include <signal.h>
 #include <time.h>
+#include <unistd.h>
 
 // ============================================================================
 // MARK: - Globals
@@ -207,6 +208,9 @@ static void cmd_help(void) {
     printf("    /verbose            Toggle llama.cpp verbose logging\n");
     printf("\n");
 #endif
+    printf("  Integrations:\n");
+    printf("    /telegram           Continue this session on Telegram\n");
+    printf("\n");
     printf("  General:\n");
     printf("    /status             Show current configuration\n");
     printf("    /help               Show this help\n");
@@ -670,6 +674,275 @@ static void cmd_verbose(void) {
 #endif
 
 // ============================================================================
+// MARK: - Telegram integration (/telegram command)
+// ============================================================================
+
+#include "adam_net.h"
+
+static char *g_tg_token = NULL;
+static int64_t g_tg_chat_id = 0;
+static int g_tg_offset = 0;
+
+static char *tg_url(const char *method) {
+    static char url[512];
+    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/%s",
+             g_tg_token, method);
+    return url;
+}
+
+static char *tg_post(const char *method, const char *body) {
+    arena_t *a = arena_create(8192);
+    if (!a) return NULL;
+    adam_net_response_t r = adam_net_post_json(
+        g_settings, a, tg_url(method), "", body, NULL, 0);
+    char *out = NULL;
+    if (r.error == ADAM_OK && r.data && r.data_len > 0) {
+        out = malloc(r.data_len + 1);
+        if (out) { memcpy(out, r.data, r.data_len); out[r.data_len] = '\0'; }
+    }
+    arena_destroy(a);
+    return out;
+}
+
+static void tg_send(int64_t chat_id, const char *text) {
+    if (!text || !*text) return;
+    size_t tlen = strlen(text);
+    size_t est = tlen * 2 + 128;
+    char *body = malloc(est);
+    if (!body) return;
+    size_t pos = (size_t)snprintf(body, est,
+        "{\"chat_id\":%lld,\"text\":\"", (long long)chat_id);
+    for (size_t i = 0; i < tlen && pos < est - 4; i++) {
+        char c = text[i];
+        if (c == '"')       { body[pos++] = '\\'; body[pos++] = '"'; }
+        else if (c == '\\') { body[pos++] = '\\'; body[pos++] = '\\'; }
+        else if (c == '\n') { body[pos++] = '\\'; body[pos++] = 'n'; }
+        else if (c == '\r') { body[pos++] = '\\'; body[pos++] = 'r'; }
+        else if (c == '\t') { body[pos++] = '\\'; body[pos++] = 't'; }
+        else body[pos++] = c;
+    }
+    snprintf(body + pos, est - pos, "\"}");
+    char *r = tg_post("sendMessage", body);
+    free(r); free(body);
+}
+
+static void tg_typing(int64_t chat_id) {
+    char body[128];
+    snprintf(body, sizeof(body),
+             "{\"chat_id\":%lld,\"action\":\"typing\"}", (long long)chat_id);
+    char *r = tg_post("sendChatAction", body);
+    free(r);
+}
+
+// Simple JSON helpers (same as telegram example)
+static char *tg_json_str(const char *json, const char *key) {
+    char search[128];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(json, search);
+    if (!p) return NULL;
+    p += strlen(search);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p != '"') return NULL;
+    p++;
+    const char *end = p;
+    while (*end && *end != '"') { if (*end == '\\') end++; end++; }
+    size_t len = (size_t)(end - p);
+    char *val = malloc(len + 1);
+    if (val) { memcpy(val, p, len); val[len] = '\0'; }
+    return val;
+}
+
+static int64_t tg_json_int(const char *json, const char *key) {
+    char search[128];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(json, search);
+    if (!p) return 0;
+    p += strlen(search);
+    while (*p == ' ' || *p == ':') p++;
+    return strtoll(p, NULL, 10);
+}
+
+static uint8_t *tg_download(const char *file_id, size_t *out_len) {
+    *out_len = 0;
+    char body[256];
+    snprintf(body, sizeof(body), "{\"file_id\":\"%s\"}", file_id);
+    char *resp = tg_post("getFile", body);
+    if (!resp) return NULL;
+    char *file_path = tg_json_str(resp, "file_path");
+    free(resp);
+    if (!file_path) return NULL;
+
+    char url[512];
+    snprintf(url, sizeof(url), "https://api.telegram.org/file/bot%s/%s",
+             g_tg_token, file_path);
+    free(file_path);
+
+    char tmp[256], cmd[768];
+    snprintf(tmp, sizeof(tmp), "/tmp/adam_tg_%d", (int)getpid());
+    snprintf(cmd, sizeof(cmd), "curl -s -o '%s' '%s'", tmp, url);
+    if (system(cmd) != 0) return NULL;
+
+    FILE *fp = fopen(tmp, "rb");
+    if (!fp) { unlink(tmp); return NULL; }
+    fseek(fp, 0, SEEK_END);
+    long flen = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (flen <= 0) { fclose(fp); unlink(tmp); return NULL; }
+    uint8_t *data = malloc((size_t)flen);
+    if (data) { fread(data, 1, (size_t)flen, fp); *out_len = (size_t)flen; }
+    fclose(fp); unlink(tmp);
+    return data;
+}
+
+static void tg_process_update(const char *upd) {
+    const char *msg = strstr(upd, "\"message\"");
+    if (!msg) return;
+
+    const char *chat_obj = strstr(msg, "\"chat\"");
+    int64_t chat_id = chat_obj ? tg_json_int(chat_obj, "id") : 0;
+    if (chat_id == 0) return;
+    g_tg_chat_id = chat_id;
+
+    char *text = tg_json_str(msg, "text");
+
+    // Photo
+    const char *photo = strstr(msg, "\"photo\"");
+    if (photo) {
+        const char *last_fid = NULL, *p = photo;
+        while ((p = strstr(p, "\"file_id\"")) != NULL) { last_fid = p; p += 9; }
+        if (last_fid) {
+            char *fid = tg_json_str(last_fid - 1, "file_id");
+            if (fid) {
+                printf("  [TG] Photo received\n");
+                size_t img_len = 0;
+                uint8_t *img = tg_download(fid, &img_len);
+                free(fid);
+                if (img && img_len > 0) {
+                    if (!text) text = tg_json_str(msg, "caption");
+                    if (!text) text = strdup("Describe this image.");
+                    adam_history_append_user(g_history, text);
+                    adam_history_attach(g_history, ADAM_MEDIA_IMAGE_JPEG,
+                                        img, img_len, "photo.jpg");
+                    free(img);
+                    tg_typing(chat_id);
+                    adam_run_result_t r = adam_run(g_settings, g_history, NULL);
+                    if (r.status == ADAM_OK && r.final_response) {
+                        tg_send(chat_id, r.final_response);
+                        printf("  [TG] → %s\n", r.final_response);
+                    }
+                    adam_run_result_free(&r);
+                    free(text);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Voice
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+    const char *voice = strstr(msg, "\"voice\"");
+    if (voice && g_settings->stt_backend != ADAM_STT_NONE) {
+        char *vfid = tg_json_str(voice, "file_id");
+        if (vfid) {
+            printf("  [TG] Voice received\n");
+            size_t alen = 0;
+            uint8_t *aud = tg_download(vfid, &alen);
+            free(vfid);
+            if (aud && alen > 0) {
+                arena_t *sa = arena_create(4096);
+                const char *transcript = NULL;
+                adam_status_t src = adam_stt_transcribe(g_settings, sa,
+                    aud, alen, ADAM_AUDIO_OGG_OPUS, &transcript);
+                free(aud);
+                if (src == ADAM_OK && transcript && *transcript) {
+                    printf("  [TG] Transcribed: %s\n", transcript);
+                    tg_typing(chat_id);
+                    adam_run_result_t r = adam_run(g_settings, g_history,
+                                                   transcript);
+                    arena_destroy(sa);
+                    if (r.status == ADAM_OK && r.final_response) {
+                        tg_send(chat_id, r.final_response);
+                        printf("  [TG] → %s\n", r.final_response);
+                    }
+                    adam_run_result_free(&r);
+                } else {
+                    arena_destroy(sa);
+                    tg_send(chat_id, "Could not transcribe voice message.");
+                }
+                free(text);
+                return;
+            }
+        }
+    }
+#endif
+
+    if (!text || !*text) { free(text); return; }
+
+    printf("  [TG] %s\n", text);
+    tg_typing(chat_id);
+    adam_run_result_t r = adam_run(g_settings, g_history, text);
+    if (r.status == ADAM_OK && r.final_response) {
+        tg_send(chat_id, r.final_response);
+        printf("  [TG] → %s\n", r.final_response);
+    }
+    adam_run_result_free(&r);
+    free(text);
+}
+
+static void cmd_telegram(void) {
+    if (!g_tg_token) g_tg_token = env_load("TELEGRAM_BOT_TOKEN");
+    if (!g_tg_token) {
+        printf("  Set TELEGRAM_BOT_TOKEN in .env first.\n");
+        printf("  Get one from @BotFather on Telegram.\n");
+        return;
+    }
+
+    // Enable STT for voice messages if OpenAI key available
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+    if (g_settings->stt_backend == ADAM_STT_NONE) {
+        char *oai = env_load("OPENAI_API_KEY");
+        if (oai) adam_settings_set_stt(g_settings, ADAM_STT_CLOUD,
+                                        NULL, oai, "whisper-1");
+    }
+#endif
+
+    printf("  Telegram mode. Session continues on Telegram.\n");
+    printf("  Send a message to the bot to start. Ctrl+C to return to CLI.\n");
+    printf("  History: %zu messages carried over.\n\n",
+           adam_history_count(g_history));
+
+    // Polling loop (shares g_settings + g_history with CLI)
+    while (!g_settings->abort_flag) {
+        char body[128];
+        snprintf(body, sizeof(body),
+            "{\"offset\":%d,\"timeout\":30,\"allowed_updates\":[\"message\"]}",
+            g_tg_offset);
+        char *resp = tg_post("getUpdates", body);
+        if (!resp) continue;
+
+        if (!strstr(resp, "\"ok\":true")) {
+            fprintf(stderr, "  Telegram error: %.100s\n", resp);
+            free(resp);
+            continue;
+        }
+
+        const char *p = strstr(resp, "\"result\"");
+        if (p) {
+            while ((p = strstr(p, "\"update_id\"")) != NULL) {
+                int uid = (int)tg_json_int(p - 1, "update_id");
+                if (uid >= g_tg_offset) g_tg_offset = uid + 1;
+                tg_process_update(p);
+                p += 11;
+            }
+        }
+        free(resp);
+    }
+
+    adam_abort_reset(g_settings);
+    printf("  Telegram mode ended. Back to CLI.\n\n");
+}
+
+// ============================================================================
 // MARK: - Command dispatch
 // ============================================================================
 
@@ -701,6 +974,7 @@ static int handle_command(const char *input) {
     if (CMD("json"))                    { cmd_json(arg); return 1; }
     if (CMD("research"))                { cmd_research(arg); return 1; }
     if (CMD("evolve"))                  { cmd_evolve(arg); return 1; }
+    if (CMD("telegram"))                { cmd_telegram(); return 1; }
 
 #ifndef ADAM_NO_SQLITE
     if (CMD("db"))                      { cmd_db(arg); return 1; }
@@ -929,6 +1203,8 @@ static int parse_args(int argc, char **argv) {
 // ============================================================================
 
 int main(int argc, char **argv) {
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
     adam_init();
 
     g_settings = adam_create_settings();
