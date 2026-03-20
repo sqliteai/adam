@@ -1043,7 +1043,7 @@ static adam_llm_response_t dispatch_llm(
         };
     }
 
-#if !defined(ADAM_NO_CURL) || defined(__APPLE__)
+#if !defined(ADAM_NO_CURL) || defined(__APPLE__) || defined(__EMSCRIPTEN__)
     // Use streaming if on_stream callback is set (real-time token delivery)
     if (s->on_stream) {
         adam_llm_response_t resp = adam_llm_call_http_stream(
