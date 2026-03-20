@@ -308,7 +308,8 @@ WASM_SRCS := src/arena.c src/adam.c src/adam_json.c src/adam_http.c \
              src/adam_tools.c src/adam_cache.c
 WASM_CFLAGS := -std=c11 -O2 -Isrc -D_POSIX_C_SOURCE=200809L \
                -DADAM_NO_LOCAL -DADAM_NO_CURL -DADAM_NO_PTHREADS \
-               -DADAM_NO_SQLITE -DADAM_NO_VOICE
+               -DADAM_NO_SQLITE -DADAM_NO_VOICE \
+               -DARENA_DEFAULT_ALIGN=8
 
 wasm: adam.js
 
