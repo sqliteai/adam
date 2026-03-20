@@ -123,8 +123,23 @@ function connect() {
         gemini: 'gemini-2.5-flash'
     };
 
-    adam_settings_set_provider(settings, providerMap[provider], apikey, model || defaultModels[provider]);
-    adam_settings_set_identity(settings, 'You are Adam, a helpful AI assistant. Be concise.');
+    // Allocate persistent C strings — adam stores the pointers, so they must
+    // outlive the cwrap call (cwrap 'string' creates temporaries that get freed)
+    function allocStr(s) {
+        const len = Module.lengthBytesUTF8(s) + 1;
+        const ptr = Module._malloc(len);
+        Module.stringToUTF8(s, ptr, len);
+        return ptr;
+    }
+    const keyPtr = allocStr(apikey);
+    const modelPtr = allocStr(model || defaultModels[provider]);
+    Module.ccall('adam_settings_set_provider', 'number',
+        ['number', 'number', 'number', 'number'],
+        [settings, providerMap[provider], keyPtr, modelPtr]);
+
+    const identPtr = allocStr('You are Adam, a helpful AI assistant. Be concise.');
+    Module.ccall('adam_settings_set_identity', 'number',
+        ['number', 'number'], [settings, identPtr]);
 
     document.getElementById('setup').style.display = 'none';
     document.getElementById('input').disabled = false;

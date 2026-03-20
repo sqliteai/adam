@@ -2030,6 +2030,13 @@ EM_ASYNC_JS(int, js_fetch_post, (
         });
     }
 
+    // Anthropic requires this header for direct browser access (CORS)
+    if (url.indexOf('anthropic.com') !== -1) {
+        headers['anthropic-dangerous-direct-browser-access'] = 'true';
+    }
+
+    console.log('fetch:', url, JSON.stringify(headers));
+
     try {
         const resp = await fetch(url, { method: 'POST', headers: headers, body: body });
         const text = await resp.text();
@@ -2040,6 +2047,7 @@ EM_ASYNC_JS(int, js_fetch_post, (
         HEAP32[out_len >> 2] = len;
         return resp.status;
     } catch (e) {
+        console.error('fetch error:', e.message, 'url:', url);
         HEAP32[out_data >> 2] = 0;
         HEAP32[out_len >> 2] = 0;
         return 0;
