@@ -122,6 +122,8 @@ static char *tg_post(const char *method, const char *body) {
             memcpy(result, resp.data, resp.data_len);
             result[resp.data_len] = '\0';
         }
+    } else if (resp.error != ADAM_OK) {
+        fprintf(stderr, "HTTP error for %s: %d\n", method, resp.error);
     }
 
     arena_destroy(arena);
@@ -213,10 +215,12 @@ static void process_message(const char *update_json) {
     // Extract chat_id and text
     // Find the "message" object first
     const char *msg = strstr(update_json, "\"message\"");
-    if (!msg) return;
+    if (!msg) { printf("  (no 'message' field in update)\n"); return; }
 
-    int64_t chat_id = json_get_int(msg, "chat_id");
-    if (chat_id == 0) return;
+    // chat_id is inside "chat":{"id":N,...}
+    const char *chat_obj = strstr(msg, "\"chat\"");
+    int64_t chat_id = chat_obj ? json_get_int(chat_obj, "id") : 0;
+    if (chat_id == 0) { printf("  (no chat_id found)\n"); return; }
 
     // Reset history if chat changed
     if (chat_id != g_chat_id) {
@@ -350,11 +354,14 @@ static void process_message(const char *update_json) {
     tg_send_typing(chat_id);
     adam_run_result_t r = adam_run(g_settings, g_history, text);
 
-    if (r.status == ADAM_OK && r.final_response)
+    if (r.status == ADAM_OK && r.final_response) {
         tg_send_message(chat_id, r.final_response);
-    else
-        tg_send_message(chat_id, r.final_response
-            ? r.final_response : "(error)");
+        printf("  → %s\n", r.final_response);
+    } else {
+        const char *err = r.final_response ? r.final_response : "(error)";
+        tg_send_message(chat_id, err);
+        printf("  → ERROR: %s\n", err);
+    }
 
     printf("  [%d in / %d out | $%.4f | %.0fms]\n",
            r.input_tokens, r.output_tokens, r.cost_usd, r.elapsed_ms);
@@ -387,6 +394,12 @@ static void poll_updates(void) {
     const char *p = strstr(resp, "\"result\"");
     if (!p) { free(resp); return; }
 
+    // Check if result array is non-empty
+    const char *arr = strstr(p, "[");
+    if (arr && arr[1] != ']') {
+        printf("  Got updates (offset=%d)\n", g_offset);
+    }
+
     while ((p = strstr(p, "\"update_id\"")) != NULL) {
         int update_id = (int)json_get_int(p - 1, "update_id");
         if (update_id >= g_offset) g_offset = update_id + 1;
@@ -404,6 +417,8 @@ static void poll_updates(void) {
 // ============================================================================
 
 int main(int argc, char **argv) {
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
     adam_init();
 
     g_settings = adam_create_settings();
