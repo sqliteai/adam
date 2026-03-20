@@ -389,8 +389,6 @@ typedef struct {
 
     // Structured error context (populated on failure):
     int                  http_status;       // HTTP status code (0 if not an HTTP error)
-    int                  retry_after_ms;    // retry-after hint in ms (0 if not provided)
-    const char          *provider_error;    // provider-specific error type (e.g. "overloaded")
 } adam_run_result_t;
 
 // ============================================================================

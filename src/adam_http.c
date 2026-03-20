@@ -109,8 +109,6 @@ adam_llm_response_t adam_llm_call_http(
     }
 
     // Classify HTTP status and parse response
-    resp.http_status = (int)net.http_code;
-
     if (net.http_code == 429) {
         resp = adam_json_parse_response(arena, s->api_format,
                                         (const char *)net.data, net.data_len);

@@ -1022,9 +1022,6 @@ static adam_llm_response_t dispatch_llm(
     }
 #endif
 
-    UNUSED_PARAM(msgs);
-    UNUSED_PARAM(msg_count);
-
     // WASM / custom HTTP path
     if (s->http_fn) {
         // TODO: build request JSON, call http_fn, parse response
@@ -1978,8 +1975,6 @@ int adam_pool_active(const adam_pool_t *pool) {
 // ============================================================================
 
 #if defined(ADAM_NO_CURL) && !defined(__APPLE__)
-
-#include "adam_net.h"
 
 void adam_net_cleanup(adam_settings_t *s) { UNUSED_PARAM(s); }
 
