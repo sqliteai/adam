@@ -9,6 +9,7 @@ Low-level internals of the Adam agent library. Covers data flow, storage, memory
 - [System Prompt Construction](#system-prompt-construction)
 - [LLM Dispatch Chain](#llm-dispatch-chain)
 - [Tool Execution](#tool-execution)
+- [Token Estimation](#token-estimation)
 - [Session Persistence](#session-persistence)
 - [Long-Term Memory](#long-term-memory)
 - [Response Cache](#response-cache)
@@ -17,6 +18,10 @@ Low-level internals of the Adam agent library. Covers data flow, storage, memory
 - [Arena Allocator](#arena-allocator)
 - [JSON Wire Formats](#json-wire-formats)
 - [SQLite Schema](#sqlite-schema)
+- [CLI](#cli)
+- [Telegram Integration](#telegram-integration)
+- [Platform Compatibility](#platform-compatibility)
+- [Thread Safety](#thread-safety)
 
 ---
 
@@ -63,8 +68,10 @@ For each iteration:
   10. Reset arena (keeps first block, frees extras, zeroes used counters)
 
   11. Smart context window check:
-      → estimate tokens in history (content_len/4 + tool_calls*50 per message)
-      → if estimate > 75% of model context window:
+      → for local models: use llama.cpp tokenizer (adam_estimate_tokens_local)
+      → for cloud models: heuristic (content_len/4 + tool_calls*30 per message)
+      → context window: from model registry, or local_ctx_size for local models
+      → if estimate > 75% of context window (or custom summarize_threshold):
          call adam_history_summarize() (LLM-based compression)
          fallback: history_compress() (drop oldest 50%)
 
@@ -89,7 +96,7 @@ For each iteration:
 
   17. Handle errors:
       → context overflow on iteration <= 2: summarize and retry
-      → other errors: set status, break
+      → other errors: set status + http_status, break
 
   18. Accumulate token counts (input_tokens, output_tokens)
 
@@ -211,6 +218,18 @@ For each tool_call in response.tool_calls:
 ```
 
 Tool results are arena-allocated (valid only for current iteration) but immediately copied into the history via strdup. The arena is reset at the top of the next iteration.
+
+---
+
+## Token Estimation
+
+Two strategies for estimating token counts:
+
+**Heuristic** (`adam_estimate_tokens`): `(content_len + 3) / 4` — approximately 4 characters per token. Used for cloud providers where no tokenizer is available. Tool calls add 30 tokens per call overhead.
+
+**Local tokenizer** (`adam_estimate_tokens_local`): Calls `llama_tokenize()` with NULL output buffer, which returns the negative token count without allocating. Accurate for the loaded model's vocabulary. Only available when `_local_ctx` is initialized (after first `adam_run` with a local model).
+
+The agent loop prefers the local tokenizer when available, falling back to the heuristic for cloud providers. For local models, the context window is taken from `local_ctx_size` (default 4096) since local models don't appear in the model registry.
 
 ---
 
@@ -871,3 +890,143 @@ PRAGMA foreign_keys=ON;         -- cascade deletes (sessions → messages)
 ```
 
 WAL mode allows `adam_run()` to read memory while another thread writes, without blocking. This is important for the thread pool where multiple agents may share a memory database.
+
+---
+
+## CLI
+
+The `adam` binary (`src/main.c`) provides an interactive chat interface with all features accessible via `/commands`.
+
+### Provider Selection
+
+```
+adam --anthropic KEY            # Anthropic Claude
+adam --openai KEY --model NAME  # OpenAI (or compatible: Groq, Together, xAI)
+adam --gemini KEY               # Google Gemini
+adam --local model.gguf         # Local llama.cpp
+```
+
+Auto-detects from `.env` if no flags given (checks `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY` in order).
+
+### Slash Commands
+
+Commands are dispatched via `handle_command()` which matches the first word after `/`:
+
+- **Chat**: `/image`, `/clear`, `/history`, `/stream`
+- **Config**: `/identity`, `/instructions`, `/tools`, `/sandbox`, `/cache`
+- **Database**: `/db` (opens SQLite, reads schema, registers sql_query tool)
+- **Memory**: `/memory`, `/session`, `/sessions`
+- **Advanced**: `/json`, `/research`, `/evolve`
+- **Voice**: `/tts`, `/speak`, `/talk`
+- **Integration**: `/telegram` (bridge session to Telegram)
+- **Local**: `/verbose`
+
+### /db Command
+
+Opens any SQLite database, reads its schema via `sqlite_master` (filtering out internal adam tables: `dbmem_*`, `_sqliteai_*`, `sqlite_*`, `sessions`, `messages`), injects the schema as LLM instructions, and registers the `sql_query` tool. Row counts per table are included.
+
+### /telegram Command
+
+Enters Telegram polling mode using the existing `g_settings` and `g_history`. The conversation carries over — the bot sees all prior context from the CLI session. Uses `getUpdates` with 30s long polling. Supports text, photos (downloaded via curl), and voice messages (transcribed via cloud Whisper STT). `Ctrl+C` returns to CLI.
+
+---
+
+## Telegram Integration
+
+The Telegram bot (`examples/telegram/`) connects Adam to a Telegram chat via the Bot API.
+
+### Architecture
+
+```
+Telegram Cloud ←→ getUpdates (30s long poll) ←→ adam_run() ←→ sendMessage
+                   getFile + curl download         ↑
+                   (photos, voice)            g_settings + g_history
+```
+
+### Message Flow
+
+1. **Text**: Extract from `message.text` → `adam_run(settings, history, text)` → `sendMessage`
+2. **Photo**: Extract largest `photo[].file_id` → `getFile` → download via curl → `adam_history_attach(JPEG)` → `adam_run` → `sendMessage`
+3. **Voice**: Extract `voice.file_id` → download OGG → `adam_stt_transcribe(OGG_OPUS)` via cloud Whisper → `adam_run` with transcribed text → `sendMessage`
+
+### JSON Parsing
+
+Uses simple string-search helpers (`tg_json_str`, `tg_json_int`) instead of a full JSON parser. The Telegram API response structure is flat enough that `strstr` + `strtoll` suffices. Chat ID is extracted from `message.chat.id` (nested object).
+
+### Session Bridging
+
+The `/telegram` CLI command shares the same `adam_settings_t` and `adam_history_t` with the CLI session. Messages sent on Telegram are appended to the same history, so the bot has full context of the CLI conversation. This enables workflows like: configure tools in CLI → continue chatting on mobile via Telegram.
+
+---
+
+## Platform Compatibility
+
+### Compile-Time Feature Gates
+
+| Gate | Disables | Auto-set |
+|------|----------|----------|
+| `ADAM_NO_CURL` | libcurl HTTP | macOS (uses NSURLSession) |
+| `ADAM_NO_LOCAL` | llama.cpp inference | WASM |
+| `ADAM_NO_PTHREADS` | Thread pool, voice | WASM |
+| `ADAM_NO_SQLITE` | Memory, sessions, SQL | WASM |
+| `ADAM_NO_VOICE` | STT/TTS subsystem | WASM |
+| `ADAM_NO_FILESYSTEM` | File tools | Emscripten |
+| `ADAM_NO_SHELL` | Shell tool | Emscripten |
+
+### Windows Compatibility Shims
+
+The codebase uses POSIX functions that don't exist on Windows. Shims are provided via `#ifdef _WIN32`:
+
+| POSIX | Windows | Files |
+|-------|---------|-------|
+| `unistd.h` | `io.h` + `process.h` + `windows.h` | adam.c, adam_local.c, main.c |
+| `nanosleep()` | `Sleep()` | adam.c (`adam_sleep_ms`), main.c (`nanosleep_ms`) |
+| `realpath()` | `_fullpath()` | adam.c |
+| `getpid()` | `_getpid()` | main.c |
+| `unlink()` | `_unlink()` | main.c |
+| `strcasecmp()` | `_stricmp()` | main.c |
+| `strtoll()` | `_strtoi64()` | main.c |
+| `dup()/dup2()` | `_dup()/_dup2()` | adam_local.c |
+| `/tmp/` | `%TEMP%` | main.c |
+
+### WASM Build
+
+`make wasm` produces `adam.js` + `adam.wasm` via Emscripten:
+
+- Feature gates: `ADAM_NO_LOCAL`, `ADAM_NO_CURL`, `ADAM_NO_PTHREADS`, `ADAM_NO_SQLITE`, `ADAM_NO_VOICE`
+- Net stubs return `ADAM_ERR_CURL` — embedder must provide `http_fn` callback
+- Exports core API for JavaScript `ccall`/`cwrap`
+- `MODULARIZE=1`, `ALLOW_MEMORY_GROWTH=1`
+- Output: ~35KB wasm + ~66KB JS wrapper
+
+### HTTP Abstraction
+
+| Platform | Implementation | File |
+|----------|---------------|------|
+| macOS/iOS | NSURLSession | `adam_net_apple.m` |
+| Linux/Windows | libcurl + mbedtls | `adam_net_curl.c` |
+| WASM | Stubs (use `http_fn`) | `adam.c` (net stubs section) |
+
+### Streaming Timeouts
+
+- **curl**: `CURLOPT_LOW_SPEED_LIMIT=1` + `CURLOPT_LOW_SPEED_TIME=30` (idle timeout). `CURLOPT_TIMEOUT=0` (no total timeout). `CURLOPT_CONNECTTIMEOUT=10`.
+- **Apple**: `timeoutIntervalForRequest=30` (idle, resets per chunk). `timeoutIntervalForResource=0` (no total timeout for SSE).
+
+---
+
+## Thread Safety
+
+`adam_settings_t` is **not thread-safe**. It contains mutable internal state:
+
+- `_local_ctx` — llama.cpp model/context (modified on first call)
+- `_mtmd_ctx` — vision context (modified on first image)
+- `_curl_llm`, `_curl_stt`, `_curl_tts` — persistent curl handles
+- `_rate_req_count`, `_rate_tok_count`, `_rate_window_start` — rate limiter
+
+Each concurrent agent must use its own `adam_settings_t`. The thread pool (`adam_pool_t`) enforces this by requiring a separate settings instance per job.
+
+`adam_memory_t` is partially thread-safe via SQLite's WAL mode — concurrent reads are safe, but writes are serialized by SQLite's internal locking.
+
+`adam_history_t` is not thread-safe. Each thread needs its own history, or external synchronization.
+
+`adam_cache_t` is not thread-safe. If shared across threads, the embedder must add a mutex.
