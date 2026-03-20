@@ -1979,6 +1979,24 @@ int adam_pool_active(const adam_pool_t *pool) {
 #endif // ADAM_NO_PTHREADS
 
 // ============================================================================
+// MARK: - WASM helper (struct returns are hard to read from JS)
+// ============================================================================
+
+#ifdef __EMSCRIPTEN__
+// Thin wrapper: runs adam_run and returns the response as a malloc'd string.
+// The caller (JS) must free the returned pointer via Module._free().
+// Returns NULL on error.
+char *adam_run_simple(adam_settings_t *s, adam_history_t *h,
+                      const char *user_message) {
+    adam_run_result_t r = adam_run(s, h, user_message);
+    char *out = r.final_response; // already malloc'd
+    r.final_response = NULL;      // prevent adam_run_result_free from freeing it
+    adam_run_result_free(&r);
+    return out;
+}
+#endif
+
+// ============================================================================
 // MARK: - Net stubs (WASM / no-HTTP builds)
 // ============================================================================
 

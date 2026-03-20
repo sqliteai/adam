@@ -71,8 +71,7 @@ let busy = false;
 let adam_init, adam_cleanup, adam_create_settings, adam_settings_destroy;
 let adam_settings_set_provider, adam_settings_set_identity;
 let adam_history_create, adam_history_destroy, adam_history_clear;
-let adam_history_count, adam_history_append_user;
-let adam_run, adam_run_result_free;
+let adam_run_simple;
 
 async function initWasm() {
     Module = await AdamModule();
@@ -86,10 +85,8 @@ async function initWasm() {
     adam_history_create = Module.cwrap('adam_history_create', 'number', []);
     adam_history_destroy = Module.cwrap('adam_history_destroy', null, ['number']);
     adam_history_clear = Module.cwrap('adam_history_clear', null, ['number']);
-    adam_history_count = Module.cwrap('adam_history_count', 'number', ['number']);
-    adam_history_append_user = Module.cwrap('adam_history_append_user', 'number', ['number', 'string']);
-    adam_run = Module.cwrap('adam_run', null, ['number', 'number', 'string'], { async: true });
-    adam_run_result_free = Module.cwrap('adam_run_result_free', null, ['number']);
+    // adam_run_simple: runs adam_run, returns response as a malloc'd string pointer
+    adam_run_simple = Module.cwrap('adam_run_simple', 'number', ['number', 'number', 'string'], { async: true });
 
     adam_init();
     document.getElementById('status').textContent = 'Ready — enter API key to start';
@@ -153,46 +150,15 @@ async function send() {
     thinking.classList.add('thinking');
 
     try {
-        // adam_run returns a struct on the stack — we read fields from WASM memory
-        // The struct layout: { status(i32), final_response(ptr), total_iterations(i32),
-        //   input_tokens(i32), output_tokens(i32), cost_usd(f32), elapsed_ms(f64), http_status(i32) }
-        const resultSize = 48; // approximate struct size
-        const resultPtr = Module._malloc(resultSize);
-        Module.HEAP32.fill(0, resultPtr >> 2, (resultPtr + resultSize) >> 2);
-
-        // Call adam_run — this is async thanks to Asyncify (suspends for fetch)
-        await Module.ccall('adam_run', null,
-            ['number', 'number', 'string'],
-            [settings, history, text],
-            { async: true });
-
-        // Read the result from the last adam_run call
-        // adam_run stores result on stack and returns it — we can't easily get it
-        // Instead, read the history to get the assistant's last message
-        const count = adam_history_count(history);
-
-        // Get the last assistant message from history
-        // We need to read history->items[count-1].content
-        // The history struct: { items(ptr), count, capacity }
-        const histItems = Module.HEAP32[history >> 2]; // items pointer
-        if (count > 0 && histItems) {
-            // adam_message_t: { role(i32), content(ptr), content_len, ... }
-            // Size of adam_message_t is platform-dependent; approximate at 72 bytes
-            const msgSize = 72;
-            const lastMsg = histItems + (count - 1) * msgSize;
-            const role = Module.HEAP32[lastMsg >> 2];
-            const contentPtr = Module.HEAP32[(lastMsg + 8) >> 2]; // content is 2nd field (after role + padding)
-            if (role === 2 && contentPtr) { // ADAM_ROLE_ASSISTANT = 2
-                thinking.textContent = Module.UTF8ToString(contentPtr);
-                thinking.classList.remove('thinking');
-            } else {
-                thinking.textContent = '(no response)';
-                thinking.classList.remove('thinking');
-            }
+        // adam_run_simple: runs the full agent loop, returns malloc'd string ptr
+        const ptr = await adam_run_simple(settings, history, text);
+        if (ptr) {
+            thinking.textContent = Module.UTF8ToString(ptr);
+            Module._free(ptr);
         } else {
-            thinking.textContent = '(no response)';
-            thinking.classList.remove('thinking');
+            thinking.textContent = '(no response — check API key and provider)';
         }
+        thinking.classList.remove('thinking');
     } catch (e) {
         thinking.textContent = 'Error: ' + e.message;
         thinking.classList.remove('thinking');
