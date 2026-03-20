@@ -314,9 +314,10 @@ wasm: adam.js
 
 adam.js: $(WASM_SRCS)
 	emcc $(WASM_CFLAGS) $(WASM_SRCS) \
-		-sEXPORTED_FUNCTIONS='["_adam_init","_adam_cleanup","_adam_create_settings","_adam_settings_destroy","_adam_settings_set_provider","_adam_settings_set_base_url","_adam_settings_set_identity","_adam_settings_set_instructions","_adam_settings_set_http_callback","_adam_settings_add_tool","_adam_history_create","_adam_history_destroy","_adam_history_clear","_adam_history_count","_adam_history_append_user","_adam_run","_adam_run_result_free","_adam_abort","_adam_abort_reset","_malloc","_free"]' \
-		-sEXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8"]' \
-		-sALLOW_MEMORY_GROWTH=1 \
+		-sEXPORTED_FUNCTIONS='["_adam_init","_adam_cleanup","_adam_create_settings","_adam_settings_destroy","_adam_settings_set_provider","_adam_settings_set_base_url","_adam_settings_set_identity","_adam_settings_set_instructions","_adam_settings_set_stream","_adam_settings_add_tool","_adam_history_create","_adam_history_destroy","_adam_history_clear","_adam_history_count","_adam_history_append_user","_adam_run","_adam_run_result_free","_adam_abort","_adam_abort_reset","_malloc","_free"]' \
+		-sEXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8","addFunction","removeFunction"]' \
+		-sALLOW_MEMORY_GROWTH=1 -sASYNCIFY \
+		-sALLOW_TABLE_GROWTH=1 \
 		-sMODULARIZE=1 -sEXPORT_NAME=AdamModule \
 		-o $@
 

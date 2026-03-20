@@ -1986,6 +1986,119 @@ int adam_pool_active(const adam_pool_t *pool) {
 
 void adam_net_cleanup(adam_settings_t *s) { UNUSED_PARAM(s); }
 
+#if defined(__EMSCRIPTEN__)
+// ============================================================================
+// Emscripten: HTTP via JavaScript fetch() + Asyncify
+// ============================================================================
+
+#include <emscripten.h>
+
+// JS async function: POST JSON, return response.
+// Allocates response data in WASM heap — caller must free.
+EM_ASYNC_JS(int, js_fetch_post, (
+    const char *url_ptr, const char *headers_json_ptr,
+    const char *body_ptr, char **out_data, int *out_len
+), {
+    const url = UTF8ToString(url_ptr);
+    const body = UTF8ToString(body_ptr);
+    const hdrs_str = UTF8ToString(headers_json_ptr);
+
+    // Parse headers: "Key1: Val1\nKey2: Val2\n..."
+    const headers = { 'Content-Type': 'application/json' };
+    if (hdrs_str) {
+        hdrs_str.split('\n').forEach(function(line) {
+            const idx = line.indexOf(': ');
+            if (idx > 0) headers[line.substring(0, idx)] = line.substring(idx + 2);
+        });
+    }
+
+    try {
+        const resp = await fetch(url, { method: 'POST', headers: headers, body: body });
+        const text = await resp.text();
+        const len = lengthBytesUTF8(text);
+        const ptr = _malloc(len + 1);
+        stringToUTF8(text, ptr, len + 1);
+        HEAP32[out_data >> 2] = ptr;
+        HEAP32[out_len >> 2] = len;
+        return resp.status;
+    } catch (e) {
+        HEAP32[out_data >> 2] = 0;
+        HEAP32[out_len >> 2] = 0;
+        return 0;
+    }
+});
+
+adam_net_response_t adam_net_post_json(
+    adam_settings_t *s, arena_t *arena, const char *url,
+    const char *auth_header, const char *body,
+    const char **extra_headers, int handle_id
+) {
+    UNUSED_PARAM(s); UNUSED_PARAM(handle_id);
+    adam_net_response_t resp = {0};
+
+    // Build headers string: "Key: Value\n..."
+    char hdrs[2048] = {0};
+    size_t hpos = 0;
+    if (auth_header && auth_header[0]) {
+        hpos += (size_t)snprintf(hdrs + hpos, sizeof(hdrs) - hpos, "%s\n", auth_header);
+    }
+    if (extra_headers) {
+        for (int i = 0; extra_headers[i]; i++)
+            hpos += (size_t)snprintf(hdrs + hpos, sizeof(hdrs) - hpos, "%s\n", extra_headers[i]);
+    }
+
+    char *data = NULL;
+    int data_len = 0;
+    int status = js_fetch_post(url, hdrs, body ? body : "", &data, &data_len);
+
+    if (status == 0 || !data) {
+        resp.error = ADAM_ERR_CURL;
+        if (data) free(data);
+        return resp;
+    }
+
+    resp.http_code = (long)status;
+    if (data_len > 0) {
+        resp.data = arena_alloc(arena, (size_t)data_len + 1);
+        if (resp.data) {
+            memcpy(resp.data, data, (size_t)data_len);
+            resp.data[data_len] = '\0';
+            resp.data_len = (size_t)data_len;
+        }
+    }
+    free(data);
+    return resp;
+}
+
+adam_net_response_t adam_net_post_multipart(
+    adam_settings_t *s, arena_t *arena, const char *url,
+    const char *auth_header, const adam_net_field_t *fields,
+    size_t field_count, int handle_id
+) {
+    UNUSED_PARAM(s); UNUSED_PARAM(arena); UNUSED_PARAM(url);
+    UNUSED_PARAM(auth_header); UNUSED_PARAM(fields);
+    UNUSED_PARAM(field_count); UNUSED_PARAM(handle_id);
+    return (adam_net_response_t){ .error = ADAM_ERR_NOT_IMPLEMENTED };
+}
+
+adam_net_response_t adam_net_post_streaming(
+    adam_settings_t *s, const char *url, const char *auth_header,
+    const char *body, const char **extra_headers,
+    adam_net_stream_fn on_chunk, void *stream_ctx, int handle_id
+) {
+    UNUSED_PARAM(s); UNUSED_PARAM(url); UNUSED_PARAM(auth_header);
+    UNUSED_PARAM(body); UNUSED_PARAM(extra_headers);
+    UNUSED_PARAM(on_chunk); UNUSED_PARAM(stream_ctx);
+    UNUSED_PARAM(handle_id);
+    // Streaming not supported in WASM — falls back to non-streaming in dispatch
+    return (adam_net_response_t){ .error = ADAM_ERR_NOT_IMPLEMENTED };
+}
+
+#else
+// ============================================================================
+// Non-Emscripten stubs: no HTTP available
+// ============================================================================
+
 adam_net_response_t adam_net_post_json(
     adam_settings_t *s, arena_t *arena, const char *url,
     const char *auth_header, const char *body,
@@ -2019,5 +2132,7 @@ adam_net_response_t adam_net_post_streaming(
     UNUSED_PARAM(handle_id);
     return (adam_net_response_t){ .error = ADAM_ERR_CURL };
 }
+
+#endif // __EMSCRIPTEN__
 
 #endif // ADAM_NO_CURL && !__APPLE__

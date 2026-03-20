@@ -65,3 +65,5 @@ examples/thread-pool/thread-pool
 examples/full-agent/full-agent
 examples/sqlite-query/sqlite-query
 examples/telegram/telegram
+examples/wasm-chat/adam.js
+examples/wasm-chat/adam.wasm

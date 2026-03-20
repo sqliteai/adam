@@ -124,6 +124,7 @@ More examples are available in the **[examples/](examples/)** directory:
 | [response-cache](examples/response-cache/) | LRU cache for repeated queries |
 | [thread-pool](examples/thread-pool/) | Concurrent agent execution |
 | [telegram](examples/telegram/) | Telegram bot with text, images, tools, and memory |
+| [wasm-chat](examples/wasm-chat/) | Browser-based chat UI via WebAssembly |
 | [full-agent](examples/full-agent/) | All features combined |
 
 ## Architecture

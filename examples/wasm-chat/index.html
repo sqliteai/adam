@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Adam Chat</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, system-ui, sans-serif; background: #1a1a2e; color: #eee; height: 100vh; display: flex; flex-direction: column; }
+.header { padding: 12px 20px; background: #16213e; border-bottom: 1px solid #0f3460; display: flex; align-items: center; gap: 12px; }
+.header h1 { font-size: 18px; font-weight: 600; }
+.header .status { font-size: 12px; color: #888; }
+.setup { padding: 20px; background: #16213e; border-bottom: 1px solid #0f3460; display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+.setup label { font-size: 12px; color: #aaa; display: flex; flex-direction: column; gap: 4px; }
+.setup select, .setup input { padding: 6px 10px; border-radius: 6px; border: 1px solid #0f3460; background: #1a1a2e; color: #eee; font-size: 13px; }
+.setup input { width: 320px; }
+.setup button { padding: 6px 16px; border-radius: 6px; border: none; background: #e94560; color: white; font-size: 13px; cursor: pointer; }
+.setup button:hover { background: #c73e54; }
+.messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+.msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; line-height: 1.5; font-size: 14px; white-space: pre-wrap; word-wrap: break-word; }
+.msg.user { align-self: flex-end; background: #0f3460; }
+.msg.assistant { align-self: flex-start; background: #16213e; border: 1px solid #0f3460; }
+.msg.system { align-self: center; background: none; color: #666; font-size: 12px; font-style: italic; }
+.input-area { padding: 12px 20px; background: #16213e; border-top: 1px solid #0f3460; display: flex; gap: 10px; }
+.input-area input { flex: 1; padding: 10px 14px; border-radius: 8px; border: 1px solid #0f3460; background: #1a1a2e; color: #eee; font-size: 14px; outline: none; }
+.input-area input:focus { border-color: #e94560; }
+.input-area button { padding: 10px 20px; border-radius: 8px; border: none; background: #e94560; color: white; font-size: 14px; cursor: pointer; }
+.input-area button:disabled { opacity: 0.5; cursor: not-allowed; }
+.thinking { color: #888; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Adam</h1>
+  <span class="status" id="status">Loading WASM...</span>
+</div>
+
+<div class="setup" id="setup">
+  <label>Provider
+    <select id="provider">
+      <option value="anthropic">Anthropic</option>
+      <option value="openai">OpenAI</option>
+      <option value="gemini">Gemini</option>
+    </select>
+  </label>
+  <label>API Key
+    <input type="password" id="apikey" placeholder="sk-ant-... or sk-... or AIza...">
+  </label>
+  <label>Model (optional)
+    <input type="text" id="model" placeholder="default">
+  </label>
+  <button onclick="connect()">Connect</button>
+</div>
+
+<div class="messages" id="messages"></div>
+
+<div class="input-area">
+  <input type="text" id="input" placeholder="Type a message..." disabled onkeydown="if(event.key==='Enter')send()">
+  <button id="sendbtn" onclick="send()" disabled>Send</button>
+</div>
+
+<script src="adam.js"></script>
+<script>
+let Module = null;
+let settings = 0;
+let history = 0;
+let busy = false;
+
+// Adam API wrappers (set after module loads)
+let adam_init, adam_cleanup, adam_create_settings, adam_settings_destroy;
+let adam_settings_set_provider, adam_settings_set_identity;
+let adam_history_create, adam_history_destroy, adam_history_clear;
+let adam_history_count, adam_history_append_user;
+let adam_run, adam_run_result_free;
+
+async function initWasm() {
+    Module = await AdamModule();
+
+    adam_init = Module.cwrap('adam_init', 'number', []);
+    adam_cleanup = Module.cwrap('adam_cleanup', null, []);
+    adam_create_settings = Module.cwrap('adam_create_settings', 'number', []);
+    adam_settings_destroy = Module.cwrap('adam_settings_destroy', null, ['number']);
+    adam_settings_set_provider = Module.cwrap('adam_settings_set_provider', 'number', ['number', 'number', 'string', 'string']);
+    adam_settings_set_identity = Module.cwrap('adam_settings_set_identity', 'number', ['number', 'string']);
+    adam_history_create = Module.cwrap('adam_history_create', 'number', []);
+    adam_history_destroy = Module.cwrap('adam_history_destroy', null, ['number']);
+    adam_history_clear = Module.cwrap('adam_history_clear', null, ['number']);
+    adam_history_count = Module.cwrap('adam_history_count', 'number', ['number']);
+    adam_history_append_user = Module.cwrap('adam_history_append_user', 'number', ['number', 'string']);
+    adam_run = Module.cwrap('adam_run', null, ['number', 'number', 'string'], { async: true });
+    adam_run_result_free = Module.cwrap('adam_run_result_free', null, ['number']);
+
+    adam_init();
+    document.getElementById('status').textContent = 'Ready — enter API key to start';
+}
+
+function addMessage(role, text) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + role;
+    div.textContent = text;
+    const container = document.getElementById('messages');
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+    return div;
+}
+
+function connect() {
+    const providerMap = { anthropic: 1, openai: 2, gemini: 3 };
+    const provider = document.getElementById('provider').value;
+    const apikey = document.getElementById('apikey').value.trim();
+    const model = document.getElementById('model').value.trim();
+
+    if (!apikey) { alert('Enter an API key'); return; }
+
+    // Clean up previous session
+    if (history) adam_history_destroy(history);
+    if (settings) adam_settings_destroy(settings);
+
+    settings = adam_create_settings();
+    history = adam_history_create();
+
+    const defaultModels = {
+        anthropic: 'claude-sonnet-4-20250514',
+        openai: 'gpt-4o-mini',
+        gemini: 'gemini-2.5-flash'
+    };
+
+    adam_settings_set_provider(settings, providerMap[provider], apikey, model || defaultModels[provider]);
+    adam_settings_set_identity(settings, 'You are Adam, a helpful AI assistant. Be concise.');
+
+    document.getElementById('setup').style.display = 'none';
+    document.getElementById('input').disabled = false;
+    document.getElementById('sendbtn').disabled = false;
+    document.getElementById('input').focus();
+    document.getElementById('status').textContent = provider + ' / ' + (model || defaultModels[provider]);
+
+    addMessage('system', 'Connected. Type a message to start chatting.');
+}
+
+async function send() {
+    if (busy || !settings) return;
+    const input = document.getElementById('input');
+    const text = input.value.trim();
+    if (!text) return;
+
+    input.value = '';
+    addMessage('user', text);
+
+    busy = true;
+    document.getElementById('sendbtn').disabled = true;
+    const thinking = addMessage('assistant', '...');
+    thinking.classList.add('thinking');
+
+    try {
+        // adam_run returns a struct on the stack — we read fields from WASM memory
+        // The struct layout: { status(i32), final_response(ptr), total_iterations(i32),
+        //   input_tokens(i32), output_tokens(i32), cost_usd(f32), elapsed_ms(f64), http_status(i32) }
+        const resultSize = 48; // approximate struct size
+        const resultPtr = Module._malloc(resultSize);
+        Module.HEAP32.fill(0, resultPtr >> 2, (resultPtr + resultSize) >> 2);
+
+        // Call adam_run — this is async thanks to Asyncify (suspends for fetch)
+        await Module.ccall('adam_run', null,
+            ['number', 'number', 'string'],
+            [settings, history, text],
+            { async: true });
+
+        // Read the result from the last adam_run call
+        // adam_run stores result on stack and returns it — we can't easily get it
+        // Instead, read the history to get the assistant's last message
+        const count = adam_history_count(history);
+
+        // Get the last assistant message from history
+        // We need to read history->items[count-1].content
+        // The history struct: { items(ptr), count, capacity }
+        const histItems = Module.HEAP32[history >> 2]; // items pointer
+        if (count > 0 && histItems) {
+            // adam_message_t: { role(i32), content(ptr), content_len, ... }
+            // Size of adam_message_t is platform-dependent; approximate at 72 bytes
+            const msgSize = 72;
+            const lastMsg = histItems + (count - 1) * msgSize;
+            const role = Module.HEAP32[lastMsg >> 2];
+            const contentPtr = Module.HEAP32[(lastMsg + 8) >> 2]; // content is 2nd field (after role + padding)
+            if (role === 2 && contentPtr) { // ADAM_ROLE_ASSISTANT = 2
+                thinking.textContent = Module.UTF8ToString(contentPtr);
+                thinking.classList.remove('thinking');
+            } else {
+                thinking.textContent = '(no response)';
+                thinking.classList.remove('thinking');
+            }
+        } else {
+            thinking.textContent = '(no response)';
+            thinking.classList.remove('thinking');
+        }
+    } catch (e) {
+        thinking.textContent = 'Error: ' + e.message;
+        thinking.classList.remove('thinking');
+    }
+
+    busy = false;
+    document.getElementById('sendbtn').disabled = false;
+    document.getElementById('input').focus();
+}
+
+initWasm().catch(e => {
+    document.getElementById('status').textContent = 'Failed to load WASM: ' + e.message;
+});
+</script>
+</body>
+</html>
