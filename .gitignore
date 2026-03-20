@@ -64,3 +64,4 @@ examples/response-cache/response-cache
 examples/thread-pool/thread-pool
 examples/full-agent/full-agent
 examples/sqlite-query/sqlite-query
+examples/telegram/telegram

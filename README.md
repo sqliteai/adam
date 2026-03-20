@@ -122,6 +122,7 @@ More examples are available in the **[examples/](examples/)** directory:
 | [guardrails](examples/guardrails/) | Pre-send and post-receive validation |
 | [response-cache](examples/response-cache/) | LRU cache for repeated queries |
 | [thread-pool](examples/thread-pool/) | Concurrent agent execution |
+| [telegram](examples/telegram/) | Telegram bot with text, images, tools, and memory |
 | [full-agent](examples/full-agent/) | All features combined |
 
 ## Architecture
