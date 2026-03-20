@@ -18,7 +18,24 @@
 #include <string.h>
 #include <signal.h>
 #include <time.h>
-#include <unistd.h>
+
+// --- Windows compatibility shims ---
+#ifdef _WIN32
+  #include <io.h>
+  #include <process.h>
+  #include <windows.h>
+  #define getpid      _getpid
+  #define unlink      _unlink
+  #define strcasecmp  _stricmp
+  #define strtoll     _strtoi64
+  static void nanosleep_ms(int ms) { Sleep(ms); }
+#else
+  #include <unistd.h>
+  static void nanosleep_ms(int ms) {
+      struct timespec ts = { ms / 1000, (ms % 1000) * 1000000 };
+      nanosleep(&ts, NULL);
+  }
+#endif
 
 // ============================================================================
 // MARK: - Globals
@@ -658,8 +675,7 @@ static void cmd_talk(void) {
 
     // Block until Ctrl+C
     while (adam_voice_is_running(g_settings)) {
-        struct timespec ts = {0, 100000000}; // 100ms
-        nanosleep(&ts, NULL);
+        nanosleep_ms(100);
     }
     adam_voice_stop(g_settings);
     printf("  Voice mode stopped.\n");
@@ -778,7 +794,12 @@ static uint8_t *tg_download(const char *file_id, size_t *out_len) {
     free(file_path);
 
     char tmp[256], cmd[768];
-    snprintf(tmp, sizeof(tmp), "/tmp/adam_tg_%d", (int)getpid());
+#ifdef _WIN32
+    const char *tmpdir = getenv("TEMP") ? getenv("TEMP") : ".";
+#else
+    const char *tmpdir = "/tmp";
+#endif
+    snprintf(tmp, sizeof(tmp), "%s/adam_tg_%d", tmpdir, (int)getpid());
     snprintf(cmd, sizeof(cmd), "curl -s -o '%s' '%s'", tmp, url);
     if (system(cmd) != 0) return NULL;
 

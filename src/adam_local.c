@@ -14,8 +14,19 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <fcntl.h>
+#ifdef _WIN32
+  #include <io.h>
+  #include <process.h>
+  #define dup    _dup
+  #define dup2   _dup2
+  #define close  _close
+  #define open   _open
+  #define STDERR_FILENO 2
+  #include <fcntl.h>
+#else
+  #include <unistd.h>
+  #include <fcntl.h>
+#endif
 
 // ============================================================================
 // MARK: - Helpers

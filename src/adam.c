@@ -12,6 +12,19 @@
 #include <stdio.h>
 #include <time.h>
 
+// --- Windows compatibility ---
+#ifdef _WIN32
+  #include <windows.h>
+  #define realpath(p, r) _fullpath((r), (p), 260)
+  static void adam_sleep_ms(int ms) { Sleep(ms); }
+#else
+  #include <unistd.h>
+  static void adam_sleep_ms(int ms) {
+      struct timespec ts = { ms / 1000, (ms % 1000) * 1000000 };
+      nanosleep(&ts, NULL);
+  }
+#endif
+
 #ifndef ADAM_NO_PTHREADS
 #include <pthread.h>
 #endif
@@ -961,8 +974,7 @@ static void rate_limit_wait(adam_settings_t *s) {
                      "Rate limit: %d/%d RPM, waiting %llds",
                      s->_rate_req_count, s->rate_requests_per_min,
                      (long long)sleep_sec);
-            struct timespec ts = { .tv_sec = (time_t)sleep_sec };
-            nanosleep(&ts, NULL);
+            adam_sleep_ms((int)(sleep_sec * 1000));
         }
         s->_rate_window_start = (int64_t)time(NULL);
         s->_rate_req_count = 0;
@@ -1084,11 +1096,7 @@ static adam_llm_response_t dispatch_with_retry(
                  resp.error_msg ? resp.error_msg : adam_status_string(resp.error),
                  attempt + 1, max_retries, delay_ms);
 
-        struct timespec ts = {
-            .tv_sec = delay_ms / 1000,
-            .tv_nsec = (long)(delay_ms % 1000) * 1000000L,
-        };
-        nanosleep(&ts, NULL);
+        adam_sleep_ms(delay_ms);
 
         // Reset arena before retry (discard previous response)
         arena_reset(arena);
