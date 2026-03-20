@@ -2035,7 +2035,6 @@ EM_ASYNC_JS(int, js_fetch_post, (
         headers['anthropic-dangerous-direct-browser-access'] = 'true';
     }
 
-    console.log('fetch:', url, JSON.stringify(headers));
 
     try {
         const resp = await fetch(url, { method: 'POST', headers: headers, body: body });
