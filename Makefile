@@ -27,7 +27,7 @@ SQLITE_VECTOR_DIR := $(ADAM_ROOT)modules/sqlite-vector
 
 SQLITE_DIR := $(ADAM_ROOT)modules/sqlite
 
-CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -O2
+CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wpedantic -O2
 CFLAGS += -Isrc -I$(MINIAUDIO_DIR) -I$(SQLITE_DIR)
 CFLAGS += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include -I$(LLAMA_DIR)/tools/mtmd
 CFLAGS += -I$(WHISPER_DIR)/include

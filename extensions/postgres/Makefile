@@ -21,6 +21,7 @@ WHISPER_BUILD := $(ADAM_ROOT)/modules/whisper.cpp/build
 
 SHLIB_LINK := -Wl,--no-as-needed $(ADAM_LIB) \
               $(WHISPER_BUILD)/src/libwhisper.a \
+              -lgomp \
               $(LLAMA_BUILD)/tools/mtmd/libmtmd.a \
               $(LLAMA_BUILD)/src/libllama.a \
               $(LLAMA_BUILD)/ggml/src/libggml.a \
@@ -45,7 +46,7 @@ else
                 -ldl -lm
 endif
 
-PG_CFLAGS += -I$(ADAM_ROOT)/src \
+PG_CPPFLAGS += -I$(ADAM_ROOT)/src \
              -I$(ADAM_ROOT)/modules/sqlite \
              -I$(ADAM_ROOT)/modules/miniaudio \
              -I$(ADAM_ROOT)/modules/llama.cpp/include \
