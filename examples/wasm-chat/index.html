@@ -60,7 +60,7 @@ body { font-family: -apple-system, system-ui, sans-serif; background: #1a1a2e; c
   <button id="sendbtn" onclick="send()" disabled>Send</button>
 </div>
 
-<script src="adam.js"></script>
+<script src="adam.js?v=2"></script>
 <script>
 let Module = null;
 let settings = 0;
@@ -140,6 +140,13 @@ function connect() {
     const identPtr = allocStr('You are Adam, a helpful AI assistant. Be concise.');
     Module.ccall('adam_settings_set_identity', 'number',
         ['number', 'number'], [settings, identPtr]);
+
+    // Verify the key was stored correctly by reading it back
+    const storedKey = Module.UTF8ToString(keyPtr);
+    if (storedKey !== apikey) {
+        alert('Key storage error: got "' + storedKey.substring(0,20) + '..." expected "' + apikey.substring(0,20) + '..."');
+        return;
+    }
 
     document.getElementById('setup').style.display = 'none';
     document.getElementById('input').disabled = false;
