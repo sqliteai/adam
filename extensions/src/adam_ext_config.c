@@ -26,9 +26,14 @@ int adam_ext_config_set(adam_ext_ctx_t *ctx,
     }
     escaped_val[j] = '\0';
 
+    // Delete + insert (portable across SQLite and PostgreSQL)
+    char del_sql[512];
+    snprintf(del_sql, sizeof(del_sql),
+        "DELETE FROM _adam_config WHERE key='%s'", key);
+    ctx->db.exec_stmt(ctx->db.db_ctx, del_sql);
+
     snprintf(sql, sizeof(sql),
-        "INSERT INTO _adam_config(key,value) VALUES('%s','%s') "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        "INSERT INTO _adam_config(key,value) VALUES('%s','%s')",
         key, escaped_val);
     return ctx->db.exec_stmt(ctx->db.db_ctx, sql);
 }

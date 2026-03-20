@@ -10,9 +10,10 @@
 #include <time.h>
 
 int adam_ext_session_init_tables(adam_ext_ctx_t *ctx) {
+    // Use portable SQL — no strftime (SQLite) or extract(epoch) (PG)
     int rc = ctx->db.exec_stmt(ctx->db.db_ctx,
         "CREATE TABLE IF NOT EXISTS _adam_sessions "
-        "(id TEXT PRIMARY KEY, created_at INTEGER DEFAULT (strftime('%s','now')))");
+        "(id TEXT PRIMARY KEY, created_at TEXT DEFAULT CURRENT_TIMESTAMP)");
     if (rc != 0) return rc;
 
     rc = ctx->db.exec_stmt(ctx->db.db_ctx,

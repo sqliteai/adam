@@ -1,0 +1,4 @@
+comment = 'Adam AI agent embedded in PostgreSQL'
+default_version = '0.1'
+module_pathname = '$libdir/adam'
+relocatable = false
