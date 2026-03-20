@@ -21,7 +21,7 @@ TELEGRAM_BOT_TOKEN=7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Any LLM provider works — set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`. For local models, use `--local` instead.
+Any LLM provider works — set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`. For local models, use `--local` instead. Add `OPENAI_API_KEY` for voice message support (Whisper STT).
 
 ### 3. Build & Run
 
@@ -59,6 +59,7 @@ Open your bot in Telegram (search for the username you chose) and press **Start*
 ## Features
 
 - **Text chat** — multi-turn conversation with full history
+- **Voice messages** — send voice notes, transcribed via Whisper STT then processed
 - **Image input** — send photos and the bot describes/analyzes them
 - **Tool calling** — calculator, web search (enable with `/tools`)
 - **Memory** — persistent knowledge across conversations (enable with `/memory`)
@@ -68,4 +69,4 @@ Open your bot in Telegram (search for the username you chose) and press **Start*
 
 The bot uses Telegram's [long polling](https://core.telegram.org/bots/api#getupdates) (`getUpdates` with 30s timeout) — no webhook or public IP needed. Each message is processed sequentially through `adam_run()`.
 
-For photos, the bot downloads the highest-resolution version via `getFile`, attaches it to the conversation via `adam_history_attach()`, and sends the result.
+For photos, the bot downloads the highest-resolution version via `getFile`, attaches it to the conversation via `adam_history_attach()`, and sends the result. Voice messages are downloaded as OGG/Opus files and transcribed via the OpenAI Whisper API (`adam_stt_transcribe`), then the transcribed text is processed through `adam_run()` like a normal message.

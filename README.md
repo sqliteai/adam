@@ -46,6 +46,7 @@ make test    # run 161 tests (ASan + UBSan)
 | **13 built-in tools** | File I/O, shell, calculator, SQL, web fetch/search, HTTP POST, memory, research, multi-agent |
 | **Long-term memory** | Hybrid BM25 + vector search via SQLite (sqlite-memory + sqlite-vector) |
 | **Session persistence** | Save/load conversations with UUIDv7 keys |
+| **Telegram bot** | Full-featured [Telegram integration](examples/telegram/) with text, voice, images, tools, and memory |
 | **Voice** | STT (Whisper cloud/local) + TTS (cloud/system) + full audio pipeline |
 | **Streaming** | Real-time token delivery via callback |
 | **Structured output** | `adam_run_json()` with validation and retry |

@@ -182,28 +182,32 @@ static uint8_t *tg_download_file(const char *file_id, size_t *out_len) {
     free(resp);
     if (!file_path) return NULL;
 
-    // Step 2: Download via URL
+    // Step 2: Download via system curl (GET request — adam_net only does POST)
     char url[512];
     snprintf(url, sizeof(url), "https://api.telegram.org/file/bot%s/%s",
              g_bot_token, file_path);
     free(file_path);
 
-    arena_t *arena = arena_create(1024 * 1024); // 1MB for photos
-    if (!arena) return NULL;
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "/tmp/adam_tg_%d", (int)getpid());
+    char cmd[768];
+    snprintf(cmd, sizeof(cmd), "curl -s -o '%s' '%s'", tmppath, url);
+    if (system(cmd) != 0) return NULL;
 
-    adam_net_response_t net = adam_net_post_json(
-        g_settings, arena, url, "", "", NULL, 0);
+    FILE *fp = fopen(tmppath, "rb");
+    if (!fp) { unlink(tmppath); return NULL; }
+    fseek(fp, 0, SEEK_END);
+    long flen = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (flen <= 0) { fclose(fp); unlink(tmppath); return NULL; }
 
-    uint8_t *data = NULL;
-    if (net.error == ADAM_OK && net.data && net.data_len > 0) {
-        data = malloc(net.data_len);
-        if (data) {
-            memcpy(data, net.data, net.data_len);
-            *out_len = net.data_len;
-        }
+    uint8_t *data = malloc((size_t)flen);
+    if (data) {
+        fread(data, 1, (size_t)flen, fp);
+        *out_len = (size_t)flen;
     }
-
-    arena_destroy(arena);
+    fclose(fp);
+    unlink(tmppath);
     return data;
 }
 
@@ -263,10 +267,15 @@ static void process_message(const char *update_json) {
                     tg_send_typing(chat_id);
                     adam_run_result_t r = adam_run(g_settings, g_history, NULL);
 
-                    if (r.status == ADAM_OK && r.final_response)
+                    if (r.status == ADAM_OK && r.final_response) {
                         tg_send_message(chat_id, r.final_response);
-                    else
-                        tg_send_message(chat_id, "(error processing image)");
+                        printf("  → %s\n", r.final_response);
+                    } else {
+                        const char *err = r.final_response
+                            ? r.final_response : adam_status_string(r.status);
+                        tg_send_message(chat_id, err);
+                        printf("  → IMAGE ERROR: %s\n", err);
+                    }
 
                     printf("  [%d in / %d out | %.0fms]\n",
                            r.input_tokens, r.output_tokens, r.elapsed_ms);
@@ -277,6 +286,57 @@ static void process_message(const char *update_json) {
             }
         }
     }
+
+    // Check for voice messages
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+    const char *voice = strstr(msg, "\"voice\"");
+    if (voice && g_settings->stt_backend != ADAM_STT_NONE) {
+        char *voice_file_id = json_get_string(voice, "file_id");
+        if (voice_file_id) {
+            printf("  Downloading voice: %s\n", voice_file_id);
+            size_t audio_len = 0;
+            uint8_t *audio_data = tg_download_file(voice_file_id, &audio_len);
+            free(voice_file_id);
+
+            if (audio_data && audio_len > 0) {
+                arena_t *stt_arena = arena_create(4096);
+                const char *transcript = NULL;
+                adam_status_t stt_rc = adam_stt_transcribe(
+                    g_settings, stt_arena, audio_data, audio_len,
+                    ADAM_AUDIO_OGG_OPUS, &transcript);
+                free(audio_data);
+
+                if (stt_rc == ADAM_OK && transcript && *transcript) {
+                    printf("  Transcribed: %s\n", transcript);
+                    tg_send_typing(chat_id);
+                    adam_run_result_t r = adam_run(g_settings, g_history,
+                                                   transcript);
+                    arena_destroy(stt_arena);
+
+                    if (r.status == ADAM_OK && r.final_response) {
+                        tg_send_message(chat_id, r.final_response);
+                        printf("  → %s\n", r.final_response);
+                    } else {
+                        const char *err = r.final_response
+                            ? r.final_response : adam_status_string(r.status);
+                        tg_send_message(chat_id, err);
+                        printf("  → VOICE ERROR: %s\n", err);
+                    }
+                    printf("  [%d in / %d out | %.0fms]\n",
+                           r.input_tokens, r.output_tokens, r.elapsed_ms);
+                    adam_run_result_free(&r);
+                } else {
+                    arena_destroy(stt_arena);
+                    tg_send_message(chat_id,
+                        "Sorry, I couldn't transcribe that voice message.");
+                    printf("  STT failed: %s\n", adam_status_string(stt_rc));
+                }
+                free(text);
+                return;
+            }
+        }
+    }
+#endif
 
     if (!text || !*text) { free(text); return; }
 
@@ -477,6 +537,18 @@ int main(int argc, char **argv) {
     adam_settings_set_identity(g_settings,
         "You are Adam, a helpful AI assistant on Telegram. "
         "Be concise and friendly. Use markdown formatting when helpful.");
+
+    // Configure STT for voice messages (cloud Whisper API)
+#if !defined(ADAM_NO_VOICE) && !defined(ADAM_NO_PTHREADS)
+    {
+        char *openai_key = env_load("OPENAI_API_KEY");
+        if (openai_key) {
+            adam_settings_set_stt(g_settings, ADAM_STT_CLOUD,
+                                  NULL, openai_key, "whisper-1");
+            printf("  Voice: enabled (Whisper API)\n");
+        }
+    }
+#endif
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
