@@ -128,8 +128,8 @@ static adam_tool_result_t ext_sql_tool(arena_t *arena, void *tool_ctx,
 
 int adam_ext_ensure_settings(adam_ext_ctx_t *ctx,
                               char *err_buf, size_t err_buf_size) {
-    if (ctx->initialized && ctx->settings) return 0;
-
+    // Always re-read config from DB (settings may have been set in a
+    // previous SQL call within the same connection)
     if (adam_ext_config_apply(ctx) != 0 || !ctx->settings) {
         snprintf(err_buf, err_buf_size,
             "adam not configured. Use: SELECT adam_config('provider','anthropic'); "
