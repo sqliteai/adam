@@ -30,6 +30,11 @@ RETURNS text
 AS 'MODULE_PATHNAME', 'pg_adam_get_session'
 LANGUAGE C;
 
+CREATE FUNCTION adam_version()
+RETURNS text
+AS 'MODULE_PATHNAME', 'pg_adam_version'
+LANGUAGE C STRICT;
+
 CREATE FUNCTION adam_clear_session()
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'pg_adam_clear_session'

@@ -239,6 +239,16 @@ static void fn_adam_clear_session(sqlite3_context *context, int argc,
 }
 
 // ============================================================================
+// MARK: - SQL function: adam_version()
+// ============================================================================
+
+static void fn_adam_version(sqlite3_context *context, int argc,
+                             sqlite3_value **argv) {
+    UNUSED_PARAM(argc); UNUSED_PARAM(argv);
+    sqlite3_result_text(context, ADAM_VERSION_STRING, -1, SQLITE_STATIC);
+}
+
+// ============================================================================
 // MARK: - Extension entry point
 // ============================================================================
 
@@ -280,6 +290,7 @@ int sqlite3_adam_init(sqlite3 *db, char **pzErrMsg,
     REG("adam_sql",            fn_adam_sql,             1);
     REG("adam_create_session", fn_adam_create_session,  0);
     REG("adam_get_session",    fn_adam_get_session,     0);
+    REG("adam_version",        fn_adam_version,         0);
 
     // Register clear_session with destructor to free ctx on db close
     sqlite3_create_function_v2(db, "adam_clear_session", 0, SQLITE_UTF8,

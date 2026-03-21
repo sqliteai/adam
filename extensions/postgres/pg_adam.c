@@ -325,6 +325,11 @@ Datum pg_adam_get_session(PG_FUNCTION_ARGS) {
     PG_RETURN_TEXT_P(cstring_to_text_copy(id));
 }
 
+PG_FUNCTION_INFO_V1(pg_adam_version);
+Datum pg_adam_version(PG_FUNCTION_ARGS) {
+    PG_RETURN_TEXT_P(cstring_to_text_copy(ADAM_VERSION_STRING));
+}
+
 PG_FUNCTION_INFO_V1(pg_adam_clear_session);
 Datum pg_adam_clear_session(PG_FUNCTION_ARGS) {
     adam_ext_ctx_t *ctx = get_ctx();
