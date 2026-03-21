@@ -76,8 +76,9 @@ int adam_ext_config_apply(adam_ext_ctx_t *ctx) {
         else if (strcmp(provider, "openai") == 0) fmt = ADAM_API_OPENAI;
         else if (strcmp(provider, "gemini") == 0) fmt = ADAM_API_GEMINI;
 
-        if (fmt != ADAM_API_NONE)
+        if (fmt != ADAM_API_NONE) {
             adam_settings_set_provider(ctx->settings, fmt, api_key, model);
+        }
     }
 
     if (identity)
