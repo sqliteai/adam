@@ -43,6 +43,7 @@ make test    # run 161 tests (ASan + UBSan)
 | **Three providers** | Anthropic, OpenAI, Google Gemini + any compatible API + local GGUF via llama.cpp |
 | **Local vision** | Multimodal image understanding via llama.cpp + mmproj (Gemma 3, LLaVA, etc.) |
 | **Image generation** | Native image output via Gemini image models (gemini-3.1-flash-image-preview) |
+| **Database extensions** | [SQLite](extensions/sqlite/) and [PostgreSQL](extensions/postgres/) extensions — embed Adam as SQL functions that query the same database |
 | **13 built-in tools** | File I/O, shell, calculator, SQL, web fetch/search, HTTP POST, memory, research, multi-agent |
 | **Long-term memory** | Hybrid BM25 + vector search via SQLite (sqlite-memory + sqlite-vector) |
 | **Session persistence** | Save/load conversations with UUIDv7 keys |
@@ -126,6 +127,42 @@ More examples are available in the **[examples/](examples/)** directory:
 | [telegram](examples/telegram/) | Telegram bot with text, images, tools, and memory |
 | [wasm-chat](examples/wasm-chat/) | Browser-based chat UI via WebAssembly |
 | [full-agent](examples/full-agent/) | All features combined |
+
+## Database Extensions
+
+Adam can be embedded directly inside SQLite and PostgreSQL as a SQL extension. The agent can query the **same database** it's loaded in — ask questions in natural language, get answers from your data.
+
+```sql
+-- SQLite
+.load adam
+
+-- PostgreSQL
+CREATE EXTENSION adam;
+
+-- Configure (both)
+SELECT adam_config('provider', 'anthropic');
+SELECT adam_config('api_key', 'sk-ant-...');
+
+-- Ask about your data — the agent reads the schema and runs SQL
+SELECT adam_ask('How many users signed up last month?');
+-- → "47 users signed up last month."
+
+-- Generate SQL without executing
+SELECT adam_sql('top 5 products by revenue');
+-- → "SELECT p.name, SUM(oi.quantity * oi.price) AS revenue FROM ..."
+```
+
+| Function | Description |
+|----------|-------------|
+| `adam_config(key, val)` | Configure provider, API key, model (persisted) |
+| `adam(msg)` | Stateless one-shot chat |
+| `adam_ask(msg)` | SQL-aware agent — reads schema, queries data, multi-turn |
+| `adam_sql(question)` | Generate SQL from natural language |
+| `adam_create_session()` | Create session (auto-created on first `adam_ask`) |
+| `adam_get_session()` | Get current session UUID |
+| `adam_clear_session()` | Clear session and history |
+
+See **[extensions/sqlite/](extensions/sqlite/)** and **[extensions/postgres/](extensions/postgres/)** for build instructions.
 
 ## Architecture
 
