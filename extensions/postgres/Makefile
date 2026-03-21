@@ -19,9 +19,8 @@ ADAM_LIB := $(ADAM_ROOT)/libadam.a
 LLAMA_BUILD := $(ADAM_ROOT)/modules/llama.cpp/build
 WHISPER_BUILD := $(ADAM_ROOT)/modules/whisper.cpp/build
 
-SHLIB_LINK := -Wl,--no-as-needed $(ADAM_LIB) \
+SHLIB_LINK := $(ADAM_LIB) \
               $(WHISPER_BUILD)/src/libwhisper.a \
-              -lgomp \
               $(LLAMA_BUILD)/tools/mtmd/libmtmd.a \
               $(LLAMA_BUILD)/src/libllama.a \
               $(LLAMA_BUILD)/ggml/src/libggml.a \
@@ -39,7 +38,8 @@ ifeq ($(UNAME_S),Darwin)
                 -framework Metal -framework MetalKit -framework Accelerate \
                 -framework AVFoundation
 else
-  SHLIB_LINK += $(ADAM_ROOT)/modules/curl/build/lib/libcurl.a \
+  SHLIB_LINK := -Wl,--no-as-needed $(SHLIB_LINK) -lgomp \
+                $(ADAM_ROOT)/modules/curl/build/lib/libcurl.a \
                 $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedtls.a \
                 $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedx509.a \
                 $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedcrypto.a \
