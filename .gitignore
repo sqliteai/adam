@@ -12,6 +12,8 @@ test_chat
 test_voice_interactive
 test_voice_talk
 adam
+build/
+dist/
 
 # Models
 *.gguf
@@ -33,6 +35,14 @@ PLAN.md
 *~
 .vscode/
 .idea/
+*.iml
+
+# Gradle / Android (packages/android)
+.gradle/
+local.properties
+
+# Dart / Flutter (packages/flutter)
+.dart_tool/
 
 # Dependency build artifacts
 deps/*/build/

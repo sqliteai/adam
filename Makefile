@@ -6,20 +6,49 @@ UNAME_S   := $(shell uname -s)
 CC        ?= cc
 
 # ============================================================================
-# Modules (git submodules in modules/)
+# Platform / arch detection (overridable from CI: PLATFORM=android ARCH=arm64-v8a)
+# ============================================================================
+
+ifeq ($(OS),Windows_NT)
+    PLATFORM ?= windows
+    HOST     := windows
+    CPUS     := $(shell powershell -Command "[Environment]::ProcessorCount" 2>/dev/null || echo 4)
+else
+    HOST := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+    ifeq ($(HOST),darwin)
+        PLATFORM ?= macos
+        CPUS     := $(shell sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    else
+        PLATFORM ?= $(HOST)
+        CPUS     := $(shell nproc 2>/dev/null || echo 4)
+    endif
+endif
+
+# CMake options pass-through from CI matrix
+LLAMA     ?=
+WHISPER   ?=
+MINIAUDIO ?=
+
+# ============================================================================
+# Modules (git submodules in modules/) and shared build/ tree
 # ============================================================================
 
 MBEDTLS_DIR   := $(ADAM_ROOT)modules/mbedtls
 CURL_DIR      := $(ADAM_ROOT)modules/curl
-MBEDTLS_BUILD := $(MBEDTLS_DIR)/build
-CURL_BUILD    := $(CURL_DIR)/build
 MINIAUDIO_DIR := $(ADAM_ROOT)modules/miniaudio
 LLAMA_DIR     := $(ADAM_ROOT)modules/llama.cpp
-LLAMA_BUILD   := $(LLAMA_DIR)/build
 WHISPER_DIR   := $(ADAM_ROOT)modules/whisper.cpp
-WHISPER_BUILD := $(WHISPER_DIR)/build
 SQLITE_MEMORY_DIR := $(ADAM_ROOT)modules/sqlite-memory
 SQLITE_VECTOR_DIR := $(ADAM_ROOT)modules/sqlite-vector
+
+# All dependency builds live under build/ at the repo root.
+BUILD_DIR     := $(ADAM_ROOT)build
+DIST_DIR      := $(ADAM_ROOT)dist
+LLAMA_BUILD   := $(BUILD_DIR)/llama.cpp
+WHISPER_BUILD := $(BUILD_DIR)/whisper.cpp
+MINIAUDIO_BUILD := $(BUILD_DIR)/miniaudio
+MBEDTLS_BUILD := $(BUILD_DIR)/mbedtls
+CURL_BUILD    := $(BUILD_DIR)/curl
 
 # ============================================================================
 # Compiler settings
@@ -27,7 +56,7 @@ SQLITE_VECTOR_DIR := $(ADAM_ROOT)modules/sqlite-vector
 
 SQLITE_DIR := $(ADAM_ROOT)modules/sqlite
 
-CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wpedantic -O2
+CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wpedantic -O2 -fPIC
 CFLAGS += -Isrc -I$(MINIAUDIO_DIR) -I$(SQLITE_DIR)
 CFLAGS += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include -I$(LLAMA_DIR)/tools/mtmd
 CFLAGS += -I$(WHISPER_DIR)/include
@@ -45,7 +74,12 @@ SQLITE_FLAGS := -DSQLITE_THREADSAFE=1 \
                 -DSQLITE_USE_ALLOCA \
                 -DSQLITE_OMIT_AUTOINIT
 
+# Android's bionic libc has pthread built in — no separate libpthread.so to link.
+ifeq ($(PLATFORM),android)
+LDFLAGS := -lz
+else
 LDFLAGS := -lpthread -lz
+endif
 
 # ============================================================================
 # Platform-specific: Apple (NSURLSession) vs Other (libcurl + mbedtls)
@@ -61,21 +95,87 @@ LLAMA_LIBS := $(LLAMA_BUILD)/tools/mtmd/libmtmd.a \
 # Only libwhisper.a is needed — ggml symbols come from LLAMA_LIBS.
 WHISPER_LIBS := $(WHISPER_BUILD)/src/libwhisper.a
 
-ifeq ($(UNAME_S),Darwin)
-  # Apple: use NSURLSession — no curl/mbedtls needed
-  CFLAGS  += -DADAM_NO_CURL
+# Apple platforms (macos, ios, ios-sim) all use NSURLSession.
+# _DARWIN_C_SOURCE re-exposes BSD extensions (e.g. memmem) that the
+# global _POSIX_C_SOURCE=200809L would otherwise hide.
+ifneq (,$(filter $(PLATFORM),macos ios ios-sim))
+  CFLAGS  += -DADAM_NO_CURL -D_DARWIN_C_SOURCE=1
   LDFLAGS += -framework Foundation
   LDFLAGS += -framework SystemConfiguration -framework Security
-  LDFLAGS += -framework CoreAudio -framework AudioToolbox
+  LDFLAGS += -framework CoreAudio -framework AudioToolbox -framework AVFoundation
   LDFLAGS += -framework Metal -framework MetalKit -framework Accelerate
   LDFLAGS += -lstdc++
   NET_SRC := src/adam_net_apple.m
   TTS_SYS_SRC := src/adam_tts_system.m
   LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
-  LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
-  LDFLAGS += -framework AVFoundation
+  # Pick up ggml-blas if llama.cpp was configured with -DGGML_BLAS=ON
+  # (libggml.a then references blas backend symbols that need this lib).
+  GGML_BLAS_LIB := $(wildcard $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a)
+  ifneq ($(GGML_BLAS_LIB),)
+    LLAMA_LIBS += $(GGML_BLAS_LIB)
+  endif
+
+  # PLATFORM_CFLAGS holds -arch + -isysroot bits that must apply to *every*
+  # compilation unit in libadam.a (otherwise sqlite3.o, sqlite-vector,
+  # sqlite-memory get built host-arch and the static archive has mixed
+  # architectures). `-x objective-c` is added only to CFLAGS — for iOS,
+  # miniaudio.h pulls in <AVFoundation/AVFoundation.h> which is Obj-C only.
+  ifeq ($(PLATFORM),macos)
+    ifndef ARCH
+      PLATFORM_CFLAGS := -arch x86_64 -arch arm64
+    else
+      PLATFORM_CFLAGS := -arch $(ARCH)
+    endif
+    CFLAGS  += $(PLATFORM_CFLAGS)
+    LDFLAGS += $(PLATFORM_CFLAGS)
+  else ifeq ($(PLATFORM),ios)
+    APPLE_SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=14.0
+    PLATFORM_CFLAGS := -arch arm64 $(APPLE_SDK)
+    CFLAGS  += $(PLATFORM_CFLAGS) -x objective-c
+    LDFLAGS += $(PLATFORM_CFLAGS)
+  else ifeq ($(PLATFORM),ios-sim)
+    APPLE_SDK := -isysroot $(shell xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=14.0
+    PLATFORM_CFLAGS := -arch x86_64 -arch arm64 $(APPLE_SDK)
+    CFLAGS  += $(PLATFORM_CFLAGS) -x objective-c
+    LDFLAGS += $(PLATFORM_CFLAGS)
+  endif
+
+  LIBS := $(WHISPER_LIBS) $(LLAMA_LIBS)
+  # Pick up CoreML stub when whisper was built with -DWHISPER_COREML=ON.
+  WHISPER_COREML_LIB := $(wildcard $(WHISPER_BUILD)/src/libwhisper.coreml.a)
+  ifneq ($(WHISPER_COREML_LIB),)
+    LIBS    += $(WHISPER_COREML_LIB)
+    LDFLAGS += -framework CoreML
+  endif
+else ifeq ($(PLATFORM),android)
+  # Android: cross-compile via NDK, use libcurl + mbedtls.
+  ifndef ARCH
+    $(error Android ARCH must be set to ARCH=x86_64, ARCH=arm64-v8a, or ARCH=armeabi-v7a)
+  endif
+  ifndef ANDROID_NDK
+    $(error ANDROID_NDK must point to the Android NDK install)
+  endif
+  ANDROID_NDK_BIN := $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(HOST)-x86_64/bin
+  ifneq (,$(filter $(ARCH),arm64 arm64-v8a))
+    NDK_TRIPLE := aarch64-linux-android26
+  else ifeq ($(ARCH),armeabi-v7a)
+    NDK_TRIPLE := armv7a-linux-androideabi26
+  else
+    NDK_TRIPLE := $(ARCH)-linux-android26
+  endif
+  CC := $(ANDROID_NDK_BIN)/$(NDK_TRIPLE)-clang
+  # Host ar/ranlib choke on ELF objects from the NDK; use llvm-ar from the NDK.
+  AR := $(ANDROID_NDK_BIN)/llvm-ar
+  CFLAGS  += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
+  LDFLAGS += -ldl -lm
+  NET_SRC := src/adam_net_curl.c
+  TTS_SYS_SRC := src/adam_tts_system.c
   LIBS    := $(WHISPER_LIBS) $(LLAMA_LIBS)
-else ifeq ($(UNAME_S),Linux)
+  LIBS    += $(CURL_BUILD)/lib/libcurl.a
+  LIBS    += $(MBEDTLS_BUILD)/library/libmbedtls.a
+  LIBS    += $(MBEDTLS_BUILD)/library/libmbedx509.a
+  LIBS    += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
+else ifeq ($(PLATFORM),linux)
   # Linux: use libcurl + mbedtls
   CFLAGS  += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
   LDFLAGS += -ldl -lm -lstdc++
@@ -91,7 +191,8 @@ else
   CFLAGS  += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
   NET_SRC := src/adam_net_curl.c
   TTS_SYS_SRC := src/adam_tts_system.c
-  LIBS    := $(CURL_BUILD)/lib/libcurl.a
+  LIBS    := $(WHISPER_LIBS) $(LLAMA_LIBS)
+  LIBS    += $(CURL_BUILD)/lib/libcurl.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
@@ -148,21 +249,24 @@ endif
 # Targets
 # ============================================================================
 
-.PHONY: all clean test live voice talk chat memory vision deps mbedtls curl llama whisper
+.PHONY: all clean test live voice talk chat memory vision deps \
+        mbedtls curl llama whisper extension xcframework aar version
 
 all: libadam.a adam
 
 # --- Static library ---
 
+AR ?= ar
+
 libadam.a: $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) $(SQLITE_VECTOR_OBJS) $(SQLITE_MEMORY_OBJS) $(SQLITE_MEMORY_HTTP_OBJ)
-	ar rcs $@ $^
+	$(AR) rcs $@ $^
 
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # SQLite amalgamation — compiled with its own flags (no -Wpedantic, etc.)
 $(SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c
-	$(CC) -std=c11 -O2 $(SQLITE_FLAGS) -c $< -o $@
+	$(CC) -std=c11 -O2 -fPIC $(PLATFORM_CFLAGS) $(SQLITE_FLAGS) -c $< -o $@
 
 # Objective-C compilation for Apple platform files
 src/adam_net_apple.o: src/adam_net_apple.m
@@ -173,11 +277,11 @@ src/adam_tts_system.o: src/adam_tts_system.m
 
 # sqlite-vector — compiled with -DSQLITE_CORE (no -Wpedantic)
 $(SQLITE_VECTOR_DIR)/src/%.o: $(SQLITE_VECTOR_DIR)/src/%.c
-	$(CC) -std=c11 -O3 -DSQLITE_CORE -I$(SQLITE_VECTOR_DIR)/src -I$(SQLITE_VECTOR_DIR)/libs -I$(SQLITE_DIR) -c $< -o $@
+	$(CC) -std=c11 -O3 -fPIC $(PLATFORM_CFLAGS) -DSQLITE_CORE -I$(SQLITE_VECTOR_DIR)/src -I$(SQLITE_VECTOR_DIR)/libs -I$(SQLITE_DIR) -c $< -o $@
 
 # sqlite-memory — compiled with -DSQLITE_CORE (no -Wpedantic)
 $(SQLITE_MEMORY_DIR)/src/%.o: $(SQLITE_MEMORY_DIR)/src/%.c
-	$(CC) $(DBMEM_CFLAGS) -c $< -o $@
+	$(CC) -fPIC $(PLATFORM_CFLAGS) $(DBMEM_CFLAGS) -c $< -o $@
 
 
 # --- CLI ---
@@ -259,35 +363,80 @@ test_vision: libadam.a test/test_vision.c
 
 # --- Dependencies ---
 
-deps: llama whisper
-ifeq ($(UNAME_S),Linux)
-deps: mbedtls curl
+# Cross-compile cmake options derived from PLATFORM/ARCH.
+# These compose with whatever the CI matrix passes via $(LLAMA)/$(WHISPER)/$(MINIAUDIO).
+ifeq ($(PLATFORM),macos)
+  ifndef ARCH
+    PLATFORM_OPTS := -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+  else
+    PLATFORM_OPTS := -DCMAKE_OSX_ARCHITECTURES="$(ARCH)" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+  endif
+else ifeq ($(PLATFORM),ios)
+  PLATFORM_OPTS := -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+else ifeq ($(PLATFORM),ios-sim)
+  PLATFORM_OPTS := -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+else ifeq ($(PLATFORM),android)
+  ifndef ARCH
+    $(error Android ARCH must be set to ARCH=x86_64, ARCH=arm64-v8a, or ARCH=armeabi-v7a)
+  endif
+  ifndef ANDROID_NDK
+    $(error ANDROID_NDK must point to the Android NDK install)
+  endif
+  ANDROID_NDK_BIN := $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(HOST)-x86_64/bin
+  PLATFORM_OPTS := -DCMAKE_TOOLCHAIN_FILE=$(ANDROID_NDK)/build/cmake/android.toolchain.cmake \
+                   -DANDROID_ABI=$(ARCH) -DANDROID_PLATFORM=android-26 \
+                   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                   -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF
+else
+  PLATFORM_OPTS :=
 endif
 
-llama:
+deps: build/llama.cpp.stamp build/whisper.cpp.stamp build/miniaudio.stamp
+ifeq ($(UNAME_S),Linux)
+deps: build/mbedtls.stamp build/curl.stamp
+endif
+
+# Stamp targets: cacheable in CI and idempotent for local dev.
+$(BUILD_DIR)/llama.cpp.stamp:
+	@mkdir -p $(BUILD_DIR)
 	cmake -B $(LLAMA_BUILD) -S $(LLAMA_DIR) \
 		-DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF \
 		-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
-		-DCMAKE_BUILD_TYPE=Release
-	cmake --build $(LLAMA_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc) --target llama --target ggml --target mtmd
+		-DCMAKE_BUILD_TYPE=Release \
+		$(PLATFORM_OPTS) $(LLAMA)
+	cmake --build $(LLAMA_BUILD) --config Release -j$(CPUS) --target llama --target ggml --target mtmd
+	touch $@
 
-whisper:
-	@# whisper.cpp/ggml must be symlinked to llama.cpp/ggml
+$(BUILD_DIR)/whisper.cpp.stamp: $(BUILD_DIR)/llama.cpp.stamp
+	@mkdir -p $(BUILD_DIR)
+	@# whisper.cpp/ggml must be symlinked to llama.cpp/ggml so whisper compiles
+	@# against the same ggml that llama.cpp is built with.
 	@test -L $(WHISPER_DIR)/ggml || (rm -rf $(WHISPER_DIR)/ggml && ln -s ../llama.cpp/ggml $(WHISPER_DIR)/ggml)
 	cmake -B $(WHISPER_BUILD) -S $(WHISPER_DIR) \
 		-DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF \
 		-DWHISPER_BUILD_EXAMPLES=OFF \
-		-DCMAKE_BUILD_TYPE=Release
-	cmake --build $(WHISPER_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc) --target whisper
+		-DCMAKE_BUILD_TYPE=Release \
+		$(PLATFORM_OPTS) $(LLAMA) $(WHISPER)
+	cmake --build $(WHISPER_BUILD) --config Release -j$(CPUS) --target whisper
+	touch $@
 
-mbedtls:
+$(BUILD_DIR)/miniaudio.stamp:
+	@mkdir -p $(MINIAUDIO_BUILD)
+	@# miniaudio is header-only — the stamp exists so CI can cache the slot
+	@# uniformly with llama/whisper.
+	touch $@
+
+$(BUILD_DIR)/mbedtls.stamp:
+	@mkdir -p $(BUILD_DIR)
 	cd $(MBEDTLS_DIR) && git submodule update --init
 	cmake -B $(MBEDTLS_BUILD) -S $(MBEDTLS_DIR) \
 		-DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
-		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-	cmake --build $(MBEDTLS_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc)
+		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		$(PLATFORM_OPTS)
+	cmake --build $(MBEDTLS_BUILD) --config Release -j$(CPUS)
+	touch $@
 
-curl: mbedtls
+$(BUILD_DIR)/curl.stamp: $(BUILD_DIR)/mbedtls.stamp
 	cmake -B $(CURL_BUILD) -S $(CURL_DIR) \
 		-DCURL_USE_MBEDTLS=ON -DCURL_USE_OPENSSL=OFF \
 		-DCURL_DISABLE_NTLM=ON -DCURL_DISABLE_LDAP=ON -DCURL_DISABLE_LDAPS=ON \
@@ -298,8 +447,16 @@ curl: mbedtls
 		-DMBEDTLS_INCLUDE_DIR=$(MBEDTLS_DIR)/include \
 		-DMBEDTLS_LIBRARY=$(MBEDTLS_BUILD)/library/libmbedtls.a \
 		-DMBEDX509_LIBRARY=$(MBEDTLS_BUILD)/library/libmbedx509.a \
-		-DMBEDCRYPTO_LIBRARY=$(MBEDTLS_BUILD)/library/libmbedcrypto.a
-	cmake --build $(CURL_BUILD) -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc)
+		-DMBEDCRYPTO_LIBRARY=$(MBEDTLS_BUILD)/library/libmbedcrypto.a \
+		$(PLATFORM_OPTS)
+	cmake --build $(CURL_BUILD) --config Release -j$(CPUS)
+	touch $@
+
+# Backwards-compatible aliases so existing developer commands still work.
+llama:    $(BUILD_DIR)/llama.cpp.stamp
+whisper:  $(BUILD_DIR)/whisper.cpp.stamp
+mbedtls:  $(BUILD_DIR)/mbedtls.stamp
+curl:     $(BUILD_DIR)/curl.stamp
 
 # --- WASM (Emscripten) ---
 
@@ -322,10 +479,137 @@ adam.js: $(WASM_SRCS)
 		-sMODULARIZE=1 -sEXPORT_NAME=AdamModule \
 		-o $@
 
+# ============================================================================
+# CI / packaging targets — built by .github/workflows/main.yml
+# ============================================================================
+
+# Print the version string from src/adam.h. Consumed by the release job.
+version:
+	@sed -n 's/^#define ADAM_VERSION_STRING[[:space:]]*"\([^"]*\)".*/\1/p' src/adam.h
+
+# Loadable SQLite extension: dist/adam.{dylib,so,dll}.
+# Wraps extensions/sqlite/Makefile after libadam.a + dependencies are built.
+ifeq ($(PLATFORM),windows)
+  EXT_FILE := adam.dll
+else ifeq ($(PLATFORM),macos)
+  EXT_FILE := adam.dylib
+else ifeq ($(PLATFORM),ios)
+  EXT_FILE := adam.dylib
+else ifeq ($(PLATFORM),ios-sim)
+  EXT_FILE := adam.dylib
+else
+  EXT_FILE := adam.so
+endif
+
+# Non-Apple platforms (linux, windows, android) need libcurl + mbedtls.
+EXT_DEPS := $(BUILD_DIR)/llama.cpp.stamp $(BUILD_DIR)/whisper.cpp.stamp $(BUILD_DIR)/miniaudio.stamp
+ifeq (,$(filter $(PLATFORM),macos ios ios-sim))
+  EXT_DEPS += $(BUILD_DIR)/mbedtls.stamp $(BUILD_DIR)/curl.stamp
+endif
+
+extension: $(DIST_DIR)/$(EXT_FILE)
+
+$(DIST_DIR)/$(EXT_FILE): $(EXT_DEPS) libadam.a
+	@mkdir -p $(DIST_DIR)
+	$(MAKE) -C extensions/sqlite all PLATFORM=$(PLATFORM) ARCH=$(ARCH)
+	cp extensions/sqlite/$(EXT_FILE) $(DIST_DIR)/$(EXT_FILE)
+
+# Apple XCFramework — builds adam.dylib three times (macos, ios, ios-sim) and
+# bundles them into dist/adam.xcframework with framework metadata.
+LIB_NAMES := ios.dylib ios-sim.dylib macos.dylib
+FMWK_NAMES := ios-arm64 ios-arm64_x86_64-simulator macos-arm64_x86_64
+
+.NOTPARALLEL: %.dylib
+%.dylib:
+	@# Clean enough to force a per-platform rebuild WITHOUT wiping dist/
+	@# (each iteration produces a renamed dylib in dist/ that the xcframework
+	@# bundling step needs).
+	rm -rf $(BUILD_DIR) libadam.a src/*.o $(SQLITE_OBJ) $(SQLITE_VECTOR_OBJS) $(SQLITE_MEMORY_OBJS)
+	$(MAKE) -C extensions/sqlite clean
+	$(MAKE) extension PLATFORM=$* LLAMA="$(LLAMA)" WHISPER="$(WHISPER)" MINIAUDIO="$(MINIAUDIO)"
+	mv $(DIST_DIR)/adam.dylib $(DIST_DIR)/$@
+
+define ADAM_PLIST
+<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\
+<plist version=\"1.0\">\
+<dict>\
+<key>CFBundleDevelopmentRegion</key><string>en</string>\
+<key>CFBundleExecutable</key><string>adam</string>\
+<key>CFBundleIdentifier</key><string>ai.sqlite.adam</string>\
+<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>\
+<key>CFBundlePackageType</key><string>FMWK</string>\
+<key>CFBundleSignature</key><string>????</string>\
+<key>CFBundleVersion</key><string>$(shell make -s version)</string>\
+<key>CFBundleShortVersionString</key><string>$(shell make -s version)</string>\
+<key>MinimumOSVersion</key><string>11.0</string>\
+</dict></plist>
+endef
+
+define ADAM_MODULEMAP
+framework module adam {\
+  umbrella header \"adam.h\"\
+  export *\
+}
+endef
+
+$(DIST_DIR)/%.xcframework: $(LIB_NAMES)
+	@$(foreach i,1 2,\
+		lib=$(word $(i),$(LIB_NAMES)); \
+		fmwk=$(word $(i),$(FMWK_NAMES)); \
+		mkdir -p $(DIST_DIR)/$$fmwk/adam.framework/Headers; \
+		mkdir -p $(DIST_DIR)/$$fmwk/adam.framework/Modules; \
+		cp src/adam.h $(DIST_DIR)/$$fmwk/adam.framework/Headers; \
+		printf "$(ADAM_PLIST)" > $(DIST_DIR)/$$fmwk/adam.framework/Info.plist; \
+		printf "$(ADAM_MODULEMAP)" > $(DIST_DIR)/$$fmwk/adam.framework/Modules/module.modulemap; \
+		mv $(DIST_DIR)/$$lib $(DIST_DIR)/$$fmwk/adam.framework/adam; \
+		install_name_tool -id "@rpath/adam.framework/adam" $(DIST_DIR)/$$fmwk/adam.framework/adam; \
+	)
+	@lib=$(word 3,$(LIB_NAMES)); \
+	fmwk=$(word 3,$(FMWK_NAMES)); \
+	mkdir -p $(DIST_DIR)/$$fmwk/adam.framework/Versions/A/Headers; \
+	mkdir -p $(DIST_DIR)/$$fmwk/adam.framework/Versions/A/Modules; \
+	mkdir -p $(DIST_DIR)/$$fmwk/adam.framework/Versions/A/Resources; \
+	cp src/adam.h $(DIST_DIR)/$$fmwk/adam.framework/Versions/A/Headers; \
+	printf "$(ADAM_PLIST)" > $(DIST_DIR)/$$fmwk/adam.framework/Versions/A/Resources/Info.plist; \
+	printf "$(ADAM_MODULEMAP)" > $(DIST_DIR)/$$fmwk/adam.framework/Versions/A/Modules/module.modulemap; \
+	mv $(DIST_DIR)/$$lib $(DIST_DIR)/$$fmwk/adam.framework/Versions/A/adam; \
+	install_name_tool -id "@rpath/adam.framework/adam" $(DIST_DIR)/$$fmwk/adam.framework/Versions/A/adam; \
+	ln -sf A $(DIST_DIR)/$$fmwk/adam.framework/Versions/Current; \
+	ln -sf Versions/Current/adam $(DIST_DIR)/$$fmwk/adam.framework/adam; \
+	ln -sf Versions/Current/Headers $(DIST_DIR)/$$fmwk/adam.framework/Headers; \
+	ln -sf Versions/Current/Modules $(DIST_DIR)/$$fmwk/adam.framework/Modules; \
+	ln -sf Versions/Current/Resources $(DIST_DIR)/$$fmwk/adam.framework/Resources;
+	xcodebuild -create-xcframework $(foreach fmwk,$(FMWK_NAMES),-framework $(DIST_DIR)/$(fmwk)/adam.framework) -output $@
+	rm -rf $(foreach fmwk,$(FMWK_NAMES),$(DIST_DIR)/$(fmwk))
+
+xcframework: $(DIST_DIR)/adam.xcframework
+
+# Android AAR — builds adam.so for arm64-v8a + x86_64, drops them into
+# packages/android/src/main/jniLibs/, then runs Gradle to assemble the AAR.
+AAR_ARM64 := packages/android/src/main/jniLibs/arm64-v8a/
+AAR_X86   := packages/android/src/main/jniLibs/x86_64/
+aar:
+	mkdir -p $(AAR_ARM64) $(AAR_X86)
+	$(MAKE) clean
+	$(MAKE) extension PLATFORM=android ARCH=arm64-v8a
+	mv $(DIST_DIR)/adam.so $(AAR_ARM64)
+	$(MAKE) clean
+	$(MAKE) extension PLATFORM=android ARCH=x86_64
+	mv $(DIST_DIR)/adam.so $(AAR_X86)
+	cd packages/android && ./gradlew clean assembleRelease
+	@mkdir -p $(DIST_DIR)
+	cp packages/android/build/outputs/aar/android-release.aar $(DIST_DIR)/adam.aar
+
 # --- Clean ---
 
 clean:
-	rm -f $(OBJS) $(NET_OBJ) $(TTS_SYS_OBJ) $(SQLITE_OBJ) libadam.a adam test_adam test_live test_chat test_memory test_evolve test_voice_interactive test_voice_talk test_tools test_vision
+	rm -f $(OBJS) $(SQLITE_OBJ) libadam.a adam test_adam test_live test_chat test_memory test_evolve test_voice_interactive test_voice_talk test_tools test_vision
+	@# Wipe ALL platform-specific net/tts objects, not just the current PLATFORM's,
+	@# so switching PLATFORM=android → PLATFORM=ios doesn't leave stale arch objects.
+	rm -f src/adam_net_apple.o src/adam_net_curl.o src/adam_tts_system.o
 	rm -f $(SQLITE_VECTOR_OBJS) $(SQLITE_MEMORY_OBJS) $(SQLITE_MEMORY_HTTP_OBJ)
 	rm -rf *.dSYM
 	rm -f adam.js adam.wasm
+	rm -rf $(BUILD_DIR) $(DIST_DIR)
+	$(MAKE) -C extensions/sqlite clean 2>/dev/null || true
