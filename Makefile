@@ -42,8 +42,10 @@ SQLITE_MEMORY_DIR := $(ADAM_ROOT)modules/sqlite-memory
 SQLITE_VECTOR_DIR := $(ADAM_ROOT)modules/sqlite-vector
 
 # All dependency builds live under build/ at the repo root.
-BUILD_DIR     := $(ADAM_ROOT)build
-DIST_DIR      := $(ADAM_ROOT)dist
+# Kept relative (not $(ADAM_ROOT)build) so target names like
+# `build/llama.cpp.stamp` match what the CI workflow invokes directly.
+BUILD_DIR     := build
+DIST_DIR      := dist
 LLAMA_BUILD   := $(BUILD_DIR)/llama.cpp
 WHISPER_BUILD := $(BUILD_DIR)/whisper.cpp
 MINIAUDIO_BUILD := $(BUILD_DIR)/miniaudio
