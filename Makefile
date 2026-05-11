@@ -58,7 +58,7 @@ CURL_BUILD    := $(BUILD_DIR)/curl
 
 SQLITE_DIR := $(ADAM_ROOT)modules/sqlite
 
-CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wpedantic -O2 -fPIC
+CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -Wall -Wextra -Wpedantic -O2 -fPIC
 CFLAGS += -Isrc -I$(MINIAUDIO_DIR) -I$(SQLITE_DIR)
 CFLAGS += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include -I$(LLAMA_DIR)/tools/mtmd
 CFLAGS += -I$(WHISPER_DIR)/include
