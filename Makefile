@@ -238,6 +238,7 @@ SQLITE_MEMORY_OBJS := $(patsubst $(SQLITE_MEMORY_DIR)/src/%.c,$(SQLITE_MEMORY_DI
 
 # sqlite-memory common flags
 DBMEM_CFLAGS := -std=c11 -O2 -DSQLITE_CORE -DDBMEM_OMIT_REMOTE_ENGINE \
+                -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE \
                 -I$(SQLITE_MEMORY_DIR)/src -I$(SQLITE_VECTOR_DIR)/src \
                 -I$(SQLITE_VECTOR_DIR)/libs -I$(SQLITE_DIR) \
                 -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include
