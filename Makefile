@@ -270,12 +270,17 @@ src/%.o: src/%.c
 $(SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c
 	$(CC) -std=c11 -O2 -fPIC $(PLATFORM_CFLAGS) $(SQLITE_FLAGS) -c $< -o $@
 
-# Objective-C compilation for Apple platform files
+# Objective-C compilation for Apple platform files. Gated on PLATFORM —
+# otherwise the explicit .m → .o rule overrides the .c pattern rule on Linux,
+# making gcc try to invoke cc1obj on adam_tts_system.m even though TTS_SYS_SRC
+# is set to adam_tts_system.c there.
+ifneq (,$(filter $(PLATFORM),macos ios ios-sim))
 src/adam_net_apple.o: src/adam_net_apple.m
 	$(CC) $(CFLAGS) -c $< -o $@
 
 src/adam_tts_system.o: src/adam_tts_system.m
 	$(CC) $(CFLAGS) -c $< -o $@
+endif
 
 # sqlite-vector — compiled with -DSQLITE_CORE (no -Wpedantic)
 $(SQLITE_VECTOR_DIR)/src/%.o: $(SQLITE_VECTOR_DIR)/src/%.c
@@ -293,8 +298,25 @@ adam: libadam.a src/main.c
 
 # --- Tests ---
 
-test: test_adam
+# `test` runs an extension-load smoke test against dist/adam.{dylib,so,dll}.
+# Pass SKIP_UNITTEST=1 to skip the test_adam CLI binary (heavy: drags in
+# fsanitize, miniaudio twice on strict linkers, needs API keys to actually
+# run). CI passes SKIP_UNITTEST=1 on platforms where the binary build
+# would conflict (e.g. NDK ld.lld rejecting duplicate miniaudio symbols).
+SQLITE3      ?= sqlite3
+SKIP_UNITTEST ?= 0
+
+TEST_DEPS := $(DIST_DIR)/$(EXT_FILE)
+ifeq ($(SKIP_UNITTEST),0)
+TEST_DEPS += test_adam
+endif
+
+test: $(TEST_DEPS)
+	@echo "Running sqlite3 CLI smoke test (load + adam_version)..."
+	$(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$(DIST_DIR)/adam" "SELECT adam_version();"
+ifeq ($(SKIP_UNITTEST),0)
 	./test_adam
+endif
 
 test_adam: libadam.a test/test_adam.c
 	$(CC) $(CFLAGS) -O0 -g -fsanitize=address,undefined \
@@ -431,8 +453,13 @@ $(BUILD_DIR)/miniaudio.stamp:
 $(BUILD_DIR)/mbedtls.stamp:
 	@mkdir -p $(BUILD_DIR)
 	cd $(MBEDTLS_DIR) && git submodule update --init
+	@# MBEDTLS_FATAL_WARNINGS=OFF: mbedtls 3.6.5 has a `%d` printf format
+	@# vs `time_t` mismatch on MinGW that hits -Werror=format. Same upstream
+	@# code is fine on glibc/macOS where time_t is `long`, so disable globally
+	@# rather than per-platform.
 	cmake -B $(MBEDTLS_BUILD) -S $(MBEDTLS_DIR) \
 		-DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+		-DMBEDTLS_FATAL_WARNINGS=OFF \
 		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
 		$(PLATFORM_OPTS)
 	cmake --build $(MBEDTLS_BUILD) --config Release -j$(CPUS)
