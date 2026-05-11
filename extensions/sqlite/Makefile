@@ -26,7 +26,7 @@ CC ?= cc
 
 ifeq ($(PLATFORM),android)
   ifndef ARCH
-    $(error Android ARCH must be set to ARCH=x86_64, ARCH=arm64-v8a, or ARCH=armeabi-v7a)
+    $(error Android ARCH must be set to ARCH=x86_64 or ARCH=arm64-v8a)
   endif
   ifndef ANDROID_NDK
     $(error ANDROID_NDK must point to the Android NDK install)
@@ -34,8 +34,6 @@ ifeq ($(PLATFORM),android)
   ANDROID_NDK_BIN := $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(HOST)-x86_64/bin
   ifneq (,$(filter $(ARCH),arm64 arm64-v8a))
     NDK_TRIPLE := aarch64-linux-android26
-  else ifeq ($(ARCH),armeabi-v7a)
-    NDK_TRIPLE := armv7a-linux-androideabi26
   else
     NDK_TRIPLE := $(ARCH)-linux-android26
   endif

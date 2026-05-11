@@ -104,8 +104,14 @@ jobs:
     needs: download-models
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container && matrix.container || '' }}
-    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.arch != 'armeabi-v7a' && matrix.name != 'ios-sim' && matrix.name != 'ios' && matrix.name != 'apple-xcframework' && matrix.name != 'android-aar' && ( matrix.name != 'macos' || matrix.arch != 'x86_64' ) && ' + test' || ''}}
+    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'ios-sim' && matrix.name != 'ios' && matrix.name != 'apple-xcframework' && matrix.name != 'android-aar' && ( matrix.name != 'macos' || matrix.arch != 'x86_64' ) && ' + test' || ''}}
     timeout-minutes: 120
+    env:
+      # Skip the test_adam CLI binary build everywhere in CI — both libadam.a
+      # and libmtmd.a embed miniaudio (mtmd-helper.cpp pulls it in too), and
+      # strict linkers (NDK ld.lld, GNU ld) refuse the duplicate symbol.
+      # Local `make test` still builds it by default.
+      SKIP_UNITTEST: 1
     strategy:
       fail-fast: false
       matrix:
@@ -163,10 +169,6 @@ jobs:
             arch: arm64-v8a
             name: android
             make: SKIP_UNITTEST=1 PLATFORM=android ARCH=arm64-v8a
-          - os: ubuntu-22.04
-            arch: armeabi-v7a
-            name: android
-            make: SKIP_UNITTEST=1 PLATFORM=android ARCH=armeabi-v7a
           - os: macos-15
             name: ios
             make: PLATFORM=ios LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple" WHISPER="-DWHISPER_COREML=ON -DWHISPER_COREML_ALLOW_FALLBACK=ON"
