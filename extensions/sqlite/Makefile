@@ -37,7 +37,12 @@ ifeq ($(PLATFORM),android)
   else
     NDK_TRIPLE := $(ARCH)-linux-android26
   endif
-  CC := $(ANDROID_NDK_BIN)/$(NDK_TRIPLE)-clang
+  # Use the C++ driver for the final link so the libc++ runtime gets
+  # pulled in. libllama / libmtmd contain C++ code referencing typeinfo
+  # symbols (e.g. _ZTISt13runtime_error); without the C++ driver +
+  # -static-libstdc++, dlopen fails at load with "cannot locate symbol".
+  # clang++ still compiles .c sources as C based on extension.
+  CC := $(ANDROID_NDK_BIN)/$(NDK_TRIPLE)-clang++
 endif
 
 # ----------------------------------------------------------------------------
@@ -154,8 +159,10 @@ else ifeq ($(PLATFORM),windows)
   LIBS += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
 else ifeq ($(PLATFORM),android)
   EXT := so
-  # -static-libstdc++ has no effect with NDK clang in this link config; omitted.
-  LDFLAGS += -shared -ldl -lm -Wl,-z,max-page-size=16384
+  # -static-libstdc++ now takes effect because the final link uses clang++
+  # (see PLATFORM=android block above); it bundles libc++_static into
+  # adam.so so it loads on devices without the NDK shared C++ runtime.
+  LDFLAGS += -shared -static-libstdc++ -ldl -lm -Wl,-z,max-page-size=16384
   CFLAGS  += -I$(ADAM_ROOT)/modules/curl/include -I$(ADAM_ROOT)/modules/mbedtls/include
   LIBS := $(WHISPER_LIBS) $(LLAMA_LIBS)
   LIBS += $(CURL_BUILD)/lib/libcurl.a
