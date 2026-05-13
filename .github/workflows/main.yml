@@ -297,19 +297,13 @@ jobs:
       - name: linux-x86_64 install vulkan
         if: matrix.name == 'linux-gpu' && matrix.arch == 'x86_64'
         run: |
-          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          # libvulkan-dev: loader + headers (cmake's FindVulkan picks them
+          # up from /usr/lib + /usr/include). shaderc: provides glslc which
+          # ggml-vulkan uses to compile shaders at build time. The previous
+          # LunarG SDK download approach broke because the tarball stopped
+          # shipping the libvulkan.so symlink cmake looks for.
           sudo apt-get update -y
-          sudo apt-get install -y mesa-vulkan-drivers
-          # Vulkan is no longer packed for Ubuntu
-          wget https://sdk.lunarg.com/sdk/download/latest/linux/vulkan-sdk.tar.xz?Human=true -O vulkan-sdk.tar.xz
-          tar -xf vulkan-sdk.tar.xz
-          cd $(ls -d 1.* | head -n1)
-          source setup-env.sh
-          echo "VULKAN_SDK=$VULKAN_SDK" >> $GITHUB_ENV
-          echo "PATH=$PATH" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> $GITHUB_ENV
-          echo "VK_ADD_LAYER_PATH=$VK_ADD_LAYER_PATH" >> $GITHUB_ENV
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan-dev shaderc
 
       - name: linux-arm64 install vulkan
         if: matrix.name == 'linux-gpu' && matrix.arch == 'arm64'
@@ -325,7 +319,7 @@ jobs:
           EOF
 
           sudo apt-get update || true    ;# Prevent failure due to missing URLs.
-          sudo apt-get install -y --no-install-recommends build-essential glslc crossbuild-essential-arm64 libvulkan-dev:arm64
+          sudo apt-get install -y --no-install-recommends build-essential shaderc crossbuild-essential-arm64 libvulkan-dev:arm64
 
       - name: cache llama.cpp build
         id: cache-llama
