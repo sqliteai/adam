@@ -55,7 +55,7 @@ endif
 # glibc strict-C11 hides strdup / strcasecmp / clock_gettime; Apple needs
 # _DARWIN_C_SOURCE; MinGW needs _GNU_SOURCE for strndup. Defining all three
 # is safe — each platform only honors the ones it knows about.
-CFLAGS := -std=c11 -Wall -Wextra -O2 -fPIC
+CFLAGS := -std=gnu11 -Wall -Wextra -O2 -fPIC
 CFLAGS += -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -D_DARWIN_C_SOURCE=1
 CFLAGS += -I$(ADAM_ROOT)/src
 CFLAGS += -I$(ADAM_ROOT)/modules/sqlite

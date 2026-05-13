@@ -58,7 +58,7 @@ CURL_BUILD    := $(BUILD_DIR)/curl
 
 SQLITE_DIR := $(ADAM_ROOT)modules/sqlite
 
-CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -Wall -Wextra -Wpedantic -O2 -fPIC
+CFLAGS := -std=gnu11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -Wall -Wextra -Wpedantic -O2 -fPIC
 CFLAGS += -Isrc -I$(MINIAUDIO_DIR) -I$(SQLITE_DIR)
 CFLAGS += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include -I$(LLAMA_DIR)/tools/mtmd
 CFLAGS += -I$(WHISPER_DIR)/include
@@ -235,7 +235,7 @@ SQLITE_MEMORY_SRCS := $(SQLITE_MEMORY_DIR)/src/sqlite-memory.c \
 SQLITE_MEMORY_OBJS := $(patsubst $(SQLITE_MEMORY_DIR)/src/%.c,$(SQLITE_MEMORY_DIR)/src/%.o,$(SQLITE_MEMORY_SRCS))
 
 # sqlite-memory common flags
-DBMEM_CFLAGS := -std=c11 -O2 -DSQLITE_CORE -DDBMEM_OMIT_REMOTE_ENGINE \
+DBMEM_CFLAGS := -std=gnu11 -O2 -DSQLITE_CORE -DDBMEM_OMIT_REMOTE_ENGINE \
                 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -D_DARWIN_C_SOURCE=1 \
                 -I$(SQLITE_MEMORY_DIR)/src -I$(SQLITE_VECTOR_DIR)/src \
                 -I$(SQLITE_VECTOR_DIR)/libs -I$(SQLITE_DIR) \
@@ -267,7 +267,7 @@ src/%.o: src/%.c
 
 # SQLite amalgamation — compiled with its own flags (no -Wpedantic, etc.)
 $(SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c
-	$(CC) -std=c11 -O2 -fPIC $(PLATFORM_CFLAGS) $(SQLITE_FLAGS) -c $< -o $@
+	$(CC) -std=gnu11 -O2 -fPIC $(PLATFORM_CFLAGS) $(SQLITE_FLAGS) -c $< -o $@
 
 # Objective-C compilation for Apple platform files. Gated on PLATFORM —
 # otherwise the explicit .m → .o rule overrides the .c pattern rule on Linux,
@@ -283,7 +283,7 @@ endif
 
 # sqlite-vector — compiled with -DSQLITE_CORE (no -Wpedantic)
 $(SQLITE_VECTOR_DIR)/src/%.o: $(SQLITE_VECTOR_DIR)/src/%.c
-	$(CC) -std=c11 -O3 -fPIC $(PLATFORM_CFLAGS) -DSQLITE_CORE -I$(SQLITE_VECTOR_DIR)/src -I$(SQLITE_VECTOR_DIR)/libs -I$(SQLITE_DIR) -c $< -o $@
+	$(CC) -std=gnu11 -O3 -fPIC $(PLATFORM_CFLAGS) -DSQLITE_CORE -I$(SQLITE_VECTOR_DIR)/src -I$(SQLITE_VECTOR_DIR)/libs -I$(SQLITE_DIR) -c $< -o $@
 
 # sqlite-memory — compiled with -DSQLITE_CORE (no -Wpedantic)
 $(SQLITE_MEMORY_DIR)/src/%.o: $(SQLITE_MEMORY_DIR)/src/%.c
@@ -422,10 +422,16 @@ endif
 # Stamp targets: cacheable in CI and idempotent for local dev.
 $(BUILD_DIR)/llama.cpp.stamp:
 	@mkdir -p $(BUILD_DIR)
+	@# -DCMAKE_POSITION_INDEPENDENT_CODE=ON: the resulting .a archives are
+	@# linked into the shared extension (dist/adam.{dylib,so,dll}), so every
+	@# object must be PIC. GNU ld on Linux/Windows rejects non-PIC TLS
+	@# relocations; macOS arm64 is implicitly PIC; Android's PLATFORM_OPTS
+	@# already includes this — but pass it unconditionally to be safe.
 	cmake -B $(LLAMA_BUILD) -S $(LLAMA_DIR) \
 		-DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF \
 		-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
-		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DCMAKE_C_FLAGS=-fPIC -DCMAKE_CXX_FLAGS=-fPIC \
 		$(PLATFORM_OPTS) $(LLAMA)
 	cmake --build $(LLAMA_BUILD) --config Release -j$(CPUS) --target llama --target ggml --target mtmd
 	touch $@
@@ -438,7 +444,8 @@ $(BUILD_DIR)/whisper.cpp.stamp: $(BUILD_DIR)/llama.cpp.stamp
 	cmake -B $(WHISPER_BUILD) -S $(WHISPER_DIR) \
 		-DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF \
 		-DWHISPER_BUILD_EXAMPLES=OFF \
-		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DCMAKE_C_FLAGS=-fPIC -DCMAKE_CXX_FLAGS=-fPIC \
 		$(PLATFORM_OPTS) $(LLAMA) $(WHISPER)
 	cmake --build $(WHISPER_BUILD) --config Release -j$(CPUS) --target whisper
 	touch $@
@@ -471,7 +478,8 @@ $(BUILD_DIR)/curl.stamp: $(BUILD_DIR)/mbedtls.stamp
 		-DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DUSE_NGHTTP2=OFF \
 		-DUSE_LIBIDN2=OFF -DCURL_USE_LIBPSL=OFF -DCURL_USE_LIBSSH2=OFF \
 		-DBUILD_SHARED_LIBS=OFF -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF \
-		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DCMAKE_C_FLAGS=-fPIC -DCMAKE_CXX_FLAGS=-fPIC \
 		-DMBEDTLS_INCLUDE_DIR=$(MBEDTLS_DIR)/include \
 		-DMBEDTLS_LIBRARY=$(MBEDTLS_BUILD)/library/libmbedtls.a \
 		-DMBEDX509_LIBRARY=$(MBEDTLS_BUILD)/library/libmbedx509.a \
