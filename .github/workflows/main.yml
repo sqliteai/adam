@@ -297,13 +297,20 @@ jobs:
       - name: linux-x86_64 install vulkan
         if: matrix.name == 'linux-gpu' && matrix.arch == 'x86_64'
         run: |
-          # libvulkan-dev: loader + headers (cmake's FindVulkan picks them
-          # up from /usr/lib + /usr/include). shaderc: provides glslc which
-          # ggml-vulkan uses to compile shaders at build time. The previous
-          # LunarG SDK download approach broke because the tarball stopped
-          # shipping the libvulkan.so symlink cmake looks for.
+          # libvulkan-dev from apt: provides the loader (libvulkan.so) +
+          # headers; cmake's FindVulkan picks them up from /usr/lib +
+          # /usr/include. ggml-vulkan does
+          # `find_package(Vulkan COMPONENTS glslc REQUIRED)` so it needs
+          # the glslc binary too — but `shaderc` isn't packaged on jammy
+          # (only on noble/24.04+). Grab just the glslc binary from the
+          # LunarG SDK tarball and drop it into /usr/local/bin.
           sudo apt-get update -y
-          sudo apt-get install -y mesa-vulkan-drivers libvulkan-dev shaderc
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan-dev
+          wget -q https://sdk.lunarg.com/sdk/download/latest/linux/vulkan-sdk.tar.xz -O /tmp/vulkan-sdk.tar.xz
+          mkdir /tmp/vulkan-sdk && tar -xf /tmp/vulkan-sdk.tar.xz -C /tmp/vulkan-sdk
+          SDK_DIR=$(ls -d /tmp/vulkan-sdk/1.* | head -n1)
+          sudo install -m 755 "$SDK_DIR/x86_64/bin/glslc" /usr/local/bin/glslc
+          rm -rf /tmp/vulkan-sdk /tmp/vulkan-sdk.tar.xz
 
       - name: linux-arm64 install vulkan
         if: matrix.name == 'linux-gpu' && matrix.arch == 'arm64'

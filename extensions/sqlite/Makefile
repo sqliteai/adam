@@ -84,11 +84,16 @@ WHISPER_BUILD := $(ADAM_ROOT)/build/whisper.cpp
 MBEDTLS_BUILD := $(ADAM_ROOT)/build/mbedtls
 CURL_BUILD    := $(ADAM_ROOT)/build/curl
 
+# ggml's CMakeLists sets VERSION/SOVERSION on its static targets, which
+# on Windows MinGW + Ninja causes cmake to drop the `lib` prefix even
+# with -DCMAKE_STATIC_LIBRARY_PREFIX=lib in the cache. Resolve each lib
+# via $(wildcard …) so we pick up whichever name was produced.
+ggml_lib = $(firstword $(wildcard $(LLAMA_BUILD)/ggml/src/lib$(1).a $(LLAMA_BUILD)/ggml/src/$(1).a))
 LLAMA_LIBS := $(LLAMA_BUILD)/tools/mtmd/libmtmd.a \
               $(LLAMA_BUILD)/src/libllama.a \
-              $(LLAMA_BUILD)/ggml/src/libggml.a \
-              $(LLAMA_BUILD)/ggml/src/libggml-cpu.a \
-              $(LLAMA_BUILD)/ggml/src/libggml-base.a
+              $(call ggml_lib,ggml) \
+              $(call ggml_lib,ggml-cpu) \
+              $(call ggml_lib,ggml-base)
 WHISPER_LIBS := $(WHISPER_BUILD)/src/libwhisper.a
 
 # Pick up CoreML stub when whisper was built with -DWHISPER_COREML=ON.
@@ -101,7 +106,8 @@ ifneq ($(WHISPER_COREML_LIB),)
 endif
 
 # Pick up ggml-blas if llama.cpp was configured with -DGGML_BLAS=ON.
-GGML_BLAS_LIB := $(wildcard $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a)
+# Check both naming conventions (lib prefix may be stripped on Windows MinGW).
+GGML_BLAS_LIB := $(firstword $(wildcard $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a $(LLAMA_BUILD)/ggml/src/ggml-blas/ggml-blas.a))
 ifneq ($(GGML_BLAS_LIB),)
   LLAMA_LIBS += $(GGML_BLAS_LIB)
 endif
