@@ -165,14 +165,21 @@ else ifeq ($(PLATFORM),ios-sim)
   LIBS := $(WHISPER_LIBS) $(LLAMA_LIBS)
 else ifeq ($(PLATFORM),windows)
   EXT := dll
-  CFLAGS  += -I$(ADAM_ROOT)/modules/curl/include -I$(ADAM_ROOT)/modules/mbedtls/include
-  LDFLAGS += -shared -lbcrypt -static-libgcc
+  # -DCURL_STATICLIB: curl.h on Windows declares functions as dllimport
+  # by default; we link the static libcurl.a so undo that.
+  CFLAGS  += -I$(ADAM_ROOT)/modules/curl/include -I$(ADAM_ROOT)/modules/mbedtls/include -DCURL_STATICLIB
+  LDFLAGS += -shared -static-libgcc
   LDFLAGS += -Wl,--push-state,-Bstatic,-lstdc++,-lwinpthread,--pop-state
   LIBS := $(WHISPER_LIBS) $(LLAMA_LIBS)
   LIBS += $(CURL_BUILD)/lib/libcurl.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
+  # -lbcrypt MUST come after libmbedcrypto.a — GNU ld processes libs
+  # left-to-right and only resolves symbols already referenced. mbedcrypto
+  # references BCryptGenRandom; if -lbcrypt sat earlier (in LDFLAGS), it
+  # would be discarded before mbedcrypto was processed.
+  LIBS += -lbcrypt
 else ifeq ($(PLATFORM),android)
   EXT := so
   # -static-libstdc++ now takes effect because the final link uses clang++

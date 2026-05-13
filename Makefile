@@ -187,8 +187,11 @@ else ifeq ($(PLATFORM),linux)
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
 else
-  # Windows/other: use libcurl + mbedtls
-  CFLAGS  += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
+  # Windows/other: use libcurl + mbedtls.
+  # -DCURL_STATICLIB: curl.h on Windows declares functions as dllimport
+  # by default; without this macro, references to curl_* become __imp_*
+  # which a static libcurl.a can't resolve.
+  CFLAGS  += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include -DCURL_STATICLIB
   NET_SRC := src/adam_net_curl.c
   TTS_SYS_SRC := src/adam_tts_system.c
   LIBS    := $(WHISPER_LIBS) $(LLAMA_LIBS)
