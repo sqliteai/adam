@@ -28,6 +28,28 @@
   #include <fcntl.h>
 #endif
 
+// Portable memmem. memmem is a GNU/BSD extension that glibc / musl / Apple
+// / Android bionic / MinGW-UCRT expose, but MSVCRT-based MinGW (msys2's
+// default `mingw64` toolchain) doesn't ship it at all. Fall back there.
+#if defined(__MINGW32__) && !defined(_UCRT)
+static void *adam_memmem(const void *haystack, size_t haystacklen,
+                         const void *needle, size_t needlelen) {
+    if (needlelen == 0) return (void *)haystack;
+    if (haystacklen < needlelen) return NULL;
+    const unsigned char *h = (const unsigned char *)haystack;
+    const unsigned char *n = (const unsigned char *)needle;
+    size_t last = haystacklen - needlelen;
+    for (size_t i = 0; i <= last; i++) {
+        if (h[i] == n[0] && memcmp(h + i, n, needlelen) == 0) {
+            return (void *)(h + i);
+        }
+    }
+    return NULL;
+}
+#else
+#define adam_memmem memmem
+#endif
+
 // ============================================================================
 // MARK: - Helpers
 // ============================================================================
@@ -383,8 +405,8 @@ static size_t parse_local_tool_calls(arena_t *arena, const char *text,
         // Find "name" and "arguments" manually (avoid jsmn dependency)
         const char *name_key = "\"name\"";
         const char *args_key = "\"arguments\"";
-        const char *nk = memmem(json_start, json_len, name_key, 6);
-        const char *ak = memmem(json_start, json_len, args_key, 11);
+        const char *nk = adam_memmem(json_start, json_len, name_key, 6);
+        const char *ak = adam_memmem(json_start, json_len, args_key, 11);
 
         if (nk && tc_idx < count) {
             // Extract name: find the string value after "name":

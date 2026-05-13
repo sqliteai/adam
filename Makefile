@@ -432,6 +432,7 @@ $(BUILD_DIR)/llama.cpp.stamp:
 		-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
 		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
 		-DCMAKE_C_FLAGS=-fPIC -DCMAKE_CXX_FLAGS=-fPIC \
+		-DGGML_OPENMP=OFF \
 		$(PLATFORM_OPTS) $(LLAMA)
 	cmake --build $(LLAMA_BUILD) --config Release -j$(CPUS) --target llama --target ggml --target mtmd
 	touch $@
@@ -446,6 +447,7 @@ $(BUILD_DIR)/whisper.cpp.stamp: $(BUILD_DIR)/llama.cpp.stamp
 		-DWHISPER_BUILD_EXAMPLES=OFF \
 		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
 		-DCMAKE_C_FLAGS=-fPIC -DCMAKE_CXX_FLAGS=-fPIC \
+		-DGGML_OPENMP=OFF \
 		$(PLATFORM_OPTS) $(LLAMA) $(WHISPER)
 	cmake --build $(WHISPER_BUILD) --config Release -j$(CPUS) --target whisper
 	touch $@
