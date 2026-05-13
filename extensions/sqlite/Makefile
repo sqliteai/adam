@@ -105,11 +105,19 @@ ifneq ($(WHISPER_COREML_LIB),)
   COREML_FRAMEWORK := -framework CoreML
 endif
 
-# Pick up ggml-blas if llama.cpp was configured with -DGGML_BLAS=ON.
+# Pick up GPU backends if llama.cpp was configured with the matching flag.
 # Check both naming conventions (lib prefix may be stripped on Windows MinGW).
-GGML_BLAS_LIB := $(firstword $(wildcard $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a $(LLAMA_BUILD)/ggml/src/ggml-blas/ggml-blas.a))
+GGML_BLAS_LIB   := $(firstword $(wildcard $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a $(LLAMA_BUILD)/ggml/src/ggml-blas/ggml-blas.a))
+GGML_VULKAN_LIB := $(firstword $(wildcard $(LLAMA_BUILD)/ggml/src/ggml-vulkan/libggml-vulkan.a $(LLAMA_BUILD)/ggml/src/ggml-vulkan/ggml-vulkan.a))
+GGML_OPENCL_LIB := $(firstword $(wildcard $(LLAMA_BUILD)/ggml/src/ggml-opencl/libggml-opencl.a $(LLAMA_BUILD)/ggml/src/ggml-opencl/ggml-opencl.a))
 ifneq ($(GGML_BLAS_LIB),)
   LLAMA_LIBS += $(GGML_BLAS_LIB)
+endif
+ifneq ($(GGML_VULKAN_LIB),)
+  LLAMA_LIBS += $(GGML_VULKAN_LIB)
+endif
+ifneq ($(GGML_OPENCL_LIB),)
+  LLAMA_LIBS += $(GGML_OPENCL_LIB)
 endif
 
 # Default link libs. Windows is fully overridden in its branch below
@@ -206,6 +214,17 @@ else
   LIBS += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
+endif
+
+# Vulkan / OpenCL runtime loaders. Must come AFTER the ggml-vulkan/-opencl
+# static libs in LIBS (single-pass GNU ld). Only added when the matching
+# backend was built (wildcard above resolved); Apple's Metal path skips
+# these — neither GGML_VULKAN_LIB nor GGML_OPENCL_LIB is set on Apple.
+ifneq ($(GGML_VULKAN_LIB),)
+  LIBS += -lvulkan
+endif
+ifneq ($(GGML_OPENCL_LIB),)
+  LIBS += -lOpenCL
 endif
 
 .PHONY: all clean test
