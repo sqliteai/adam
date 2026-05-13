@@ -38,14 +38,16 @@ ifeq ($(PLATFORM),android)
     NDK_TRIPLE := $(ARCH)-linux-android26
   endif
   CC := $(ANDROID_NDK_BIN)/$(NDK_TRIPLE)-clang
-  # The final link uses the C++ driver so the libc++ runtime gets pulled
-  # in. libllama / libmtmd embed C++ types whose typeinfo symbols (e.g.
-  # _ZTISt13runtime_error) would otherwise be missing — dlopen would fail
-  # at load with "cannot locate symbol". $(LD) is only used at link time
-  # so -std=c11 in the per-source compile rules doesn't clash with C++.
   LD := $(ANDROID_NDK_BIN)/$(NDK_TRIPLE)-clang++
 else
-  LD := $(CC)
+  # Use the C++ driver for the final link on every platform. libllama /
+  # libmtmd / libwhisper are C++ archives that reference typeinfo symbols
+  # like _ZTVN10__cxxabiv117__class_type_infoE. With the C driver and GNU
+  # ld's --as-needed default, the -lstdc++ in LDFLAGS gets dropped (it
+  # appears before the objects), and dlopen fails at load. macOS' linker
+  # is permissive enough that `cc` happened to work there, but we make it
+  # consistent. `c++` resolves to clang++ on Apple, g++ on Linux/MinGW.
+  LD := c++
 endif
 
 # ----------------------------------------------------------------------------

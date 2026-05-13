@@ -18,6 +18,23 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+// Portable strndup. POSIX 2008 (glibc / musl / Apple / Android bionic /
+// MinGW-UCRT) all expose strndup, so we alias straight to the system call.
+// Only MSVCRT-based MinGW (msys2 `mingw64` toolchain, what GitHub Actions
+// uses by default) doesn't ship strndup at all — fall back there.
+#if defined(__MINGW32__) && !defined(_UCRT)
+static inline char *adam_strndup(const char *s, size_t n) {
+    char *p = (char *)malloc(n + 1);
+    if (!p) return NULL;
+    size_t i;
+    for (i = 0; i < n && s[i]; i++) p[i] = s[i];
+    p[i] = '\0';
+    return p;
+}
+#else
+#define adam_strndup strndup
+#endif
+
 // Internal: get the sqlite3* handle from adam_memory_t (defined in adam_memory.c)
 extern sqlite3 *adam_memory_db(adam_memory_t *mem);
 
@@ -127,7 +144,7 @@ static void deserialize_tool_calls(const char *json,
         if (id_key && id_key < obj_end) {
             const char *v = strchr(id_key + 5, '"');
             if (v) { v++; const char *e = strchr(v, '"');
-                if (e) { calls[idx].id = strndup(v, (size_t)(e - v)); }
+                if (e) { calls[idx].id = adam_strndup(v, (size_t)(e - v)); }
             }
         }
 
@@ -136,7 +153,7 @@ static void deserialize_tool_calls(const char *json,
         if (name_key && name_key < obj_end) {
             const char *v = strchr(name_key + 7, '"');
             if (v) { v++; const char *e = strchr(v, '"');
-                if (e) { calls[idx].name = strndup(v, (size_t)(e - v)); }
+                if (e) { calls[idx].name = adam_strndup(v, (size_t)(e - v)); }
             }
         }
 
