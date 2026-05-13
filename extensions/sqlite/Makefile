@@ -112,9 +112,13 @@ ifneq ($(GGML_BLAS_LIB),)
   LLAMA_LIBS += $(GGML_BLAS_LIB)
 endif
 
-# Android's bionic libc has pthread built in — no separate libpthread.so to link.
+# Default link libs. Windows is fully overridden in its branch below
+# because -lpthread doesn't exist on MinGW (we use -lwinpthread instead)
+# and -lz needs to sit after the static libs, not before.
 ifeq ($(PLATFORM),android)
   LDFLAGS := -lz
+else ifeq ($(PLATFORM),windows)
+  LDFLAGS :=
 else
   LDFLAGS := -lpthread -lz
 endif
@@ -175,11 +179,11 @@ else ifeq ($(PLATFORM),windows)
   LIBS += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
-  # -lbcrypt MUST come after libmbedcrypto.a — GNU ld processes libs
-  # left-to-right and only resolves symbols already referenced. mbedcrypto
-  # references BCryptGenRandom; if -lbcrypt sat earlier (in LDFLAGS), it
-  # would be discarded before mbedcrypto was processed.
-  LIBS += -lbcrypt
+  # System libs MUST come after the static archives that reference them
+  # (GNU ld is single-pass left-to-right). curl needs Winsock + crypt32;
+  # mbedtls needs bcrypt for BCryptGenRandom; curl uses zlib for gzip
+  # content-encoding.
+  LIBS += -lws2_32 -lcrypt32 -lbcrypt -lz
 else ifeq ($(PLATFORM),android)
   EXT := so
   # -static-libstdc++ now takes effect because the final link uses clang++
