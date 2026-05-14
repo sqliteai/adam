@@ -288,7 +288,7 @@ jobs:
             -w /workspace \
             alpine:latest \
             tail -f /dev/null
-          docker exec alpine sh -c "apk update && apk add --no-cache gcc g++ make cmake sqlite musl-dev linux-headers python3 curl-dev openssl-dev zlib-dev"
+          docker exec alpine sh -c "apk update && apk add --no-cache git gcc g++ make cmake sqlite musl-dev linux-headers python3 curl-dev openssl-dev zlib-dev"
 
       - name: linux install opencl
         if: matrix.name == 'linux-gpu'
