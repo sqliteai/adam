@@ -120,15 +120,18 @@ ifneq ($(GGML_OPENCL_LIB),)
   LLAMA_LIBS += $(GGML_OPENCL_LIB)
 endif
 
-# Default link libs. Windows is fully overridden in its branch below
-# because -lpthread doesn't exist on MinGW (we use -lwinpthread instead)
-# and -lz needs to sit after the static libs, not before.
+# Default link libs. -lz is appended to LIBS (not LDFLAGS) for every
+# platform that uses libcurl — libcurl references inflate*, and with
+# single-pass GNU ld + --as-needed, -lz must sit AFTER libcurl.a or
+# libz.so gets dropped from DT_NEEDED. glibc loaders happen to find
+# inflateEnd through the global namespace anyway; musl is strict and
+# fails dlopen with "Error relocating: inflateEnd: symbol not found".
 ifeq ($(PLATFORM),android)
-  LDFLAGS := -lz
+  LDFLAGS :=
 else ifeq ($(PLATFORM),windows)
   LDFLAGS :=
 else
-  LDFLAGS := -lpthread -lz
+  LDFLAGS := -lpthread
 endif
 
 # ----------------------------------------------------------------------------
@@ -204,6 +207,7 @@ else ifeq ($(PLATFORM),android)
   LIBS += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
+  LIBS += -lz
 else
   # linux (default)
   EXT := so
@@ -214,6 +218,7 @@ else
   LIBS += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
+  LIBS += -lz
 endif
 
 # Vulkan / OpenCL runtime loaders. Must come AFTER the ggml-vulkan/-opencl
