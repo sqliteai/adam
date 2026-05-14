@@ -289,6 +289,11 @@ jobs:
             alpine:latest \
             tail -f /dev/null
           docker exec alpine sh -c "apk update && apk add --no-cache git gcc g++ make cmake sqlite musl-dev linux-headers python3 curl-dev openssl-dev zlib-dev"
+          # Tell git inside the container that the bind-mounted workspace is
+          # safe — git runs as root in the container while the files are
+          # owned by the runner user, which trips git's "dubious ownership"
+          # check.
+          docker exec alpine git config --global --add safe.directory '*'
 
       - name: linux install opencl
         if: matrix.name == 'linux-gpu'
