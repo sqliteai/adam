@@ -220,8 +220,15 @@ endif
 # static libs in LIBS (single-pass GNU ld). Only added when the matching
 # backend was built (wildcard above resolved); Apple's Metal path skips
 # these — neither GGML_VULKAN_LIB nor GGML_OPENCL_LIB is set on Apple.
+# On Windows the Vulkan loader DLL is `vulkan-1.dll` (with the -1 suffix
+# baked in) and the corresponding import library is libvulkan-1.dll.a, so
+# the linker flag is `-lvulkan-1`, not `-lvulkan`.
 ifneq ($(GGML_VULKAN_LIB),)
-  LIBS += -lvulkan
+  ifeq ($(PLATFORM),windows)
+    LIBS += -lvulkan-1
+  else
+    LIBS += -lvulkan
+  endif
 endif
 ifneq ($(GGML_OPENCL_LIB),)
   LIBS += -lOpenCL
