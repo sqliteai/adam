@@ -524,7 +524,11 @@ jobs:
 
       - name: unix test adam extension
         if: contains(matrix.name, 'linux') || ( matrix.name == 'macos' && matrix.arch != 'x86_64' )
-        run: ${{ contains(matrix.name, 'linux-musl') && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
+        # -e SKIP_UNITTEST passes the job-level env into the linux-musl arm64
+        # docker container so `make test` skips the test_adam CLI binary
+        # (which links -fsanitize=address/undefined — libasan/ubsan aren't in
+        # Alpine — and also hits the duplicate miniaudio symbol from libmtmd).
+        run: ${{ contains(matrix.name, 'linux-musl') && matrix.arch == 'arm64' && 'docker exec -e SKIP_UNITTEST alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
 
       - uses: actions/upload-artifact@v4.6.2
         if: always()
