@@ -24,6 +24,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#define adam_mkdir(p, m) _mkdir(p)
+#else
+#define adam_mkdir(p, m) mkdir((p), (m))
+#endif
 
 #ifndef ADAM_NO_PTHREADS
 #include <pthread.h>
@@ -3625,7 +3631,7 @@ TEST(tool_list_directory_sandbox) {
     ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
 
     // Create test directory with a file
-    mkdir("/tmp/adam_test_dir", 0755);
+    adam_mkdir("/tmp/adam_test_dir", 0755);
     FILE *f = fopen("/tmp/adam_test_dir/test.txt", "w");
     if (f) { fputs("x", f); fclose(f); }
 
