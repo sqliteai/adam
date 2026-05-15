@@ -87,11 +87,17 @@ endif
 # Platform-specific: Apple (NSURLSession) vs Other (libcurl + mbedtls)
 # ============================================================================
 
+# MinGW Ninja sometimes ignores -DCMAKE_STATIC_LIBRARY_PREFIX=lib for ggml
+# sub-targets and emits `ggml.a` / `ggml-cpu.a` / `ggml-base.a` without
+# the `lib` prefix. `ggml_lib` resolves to whichever variant exists so
+# the LLAMA_LIBS list works on every platform.
+ggml_lib = $(firstword $(wildcard $(LLAMA_BUILD)/ggml/src/lib$(1).a $(LLAMA_BUILD)/ggml/src/$(1).a))
+
 LLAMA_LIBS := $(LLAMA_BUILD)/tools/mtmd/libmtmd.a \
               $(LLAMA_BUILD)/src/libllama.a \
-              $(LLAMA_BUILD)/ggml/src/libggml.a \
-              $(LLAMA_BUILD)/ggml/src/libggml-cpu.a \
-              $(LLAMA_BUILD)/ggml/src/libggml-base.a
+              $(call ggml_lib,ggml) \
+              $(call ggml_lib,ggml-cpu) \
+              $(call ggml_lib,ggml-base)
 
 # Whisper uses llama's ggml (symlinked: whisper.cpp/ggml → llama.cpp/ggml).
 # Only libwhisper.a is needed — ggml symbols come from LLAMA_LIBS.
