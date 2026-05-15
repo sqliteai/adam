@@ -300,13 +300,51 @@ adam: libadam.a src/main.c
 
 # --- Tests ---
 
-# `test` runs an extension-load smoke test against dist/adam.{dylib,so,dll}.
-# Pass SKIP_UNITTEST=1 to skip the test_adam CLI binary (heavy: drags in
-# fsanitize, miniaudio twice on strict linkers, needs API keys to actually
-# run). CI passes SKIP_UNITTEST=1 on platforms where the binary build
-# would conflict (e.g. NDK ld.lld rejecting duplicate miniaudio symbols).
-SQLITE3      ?= sqlite3
+# `test` runs an extension-load smoke test against dist/adam.{dylib,so,dll}
+# plus the test_adam mock-LLM unit-test binary.
+#
+# SANITIZE=0 disables -fsanitize=address,undefined for environments where
+# libasan/libubsan aren't shipped (Alpine musl, MinGW). Local dev keeps
+# sanitizers on by default.
+#
+# SKIP_UNITTEST=1 falls back to smoke-test-only — kept as an escape hatch
+# for any platform where the test_adam binary can't be produced at all.
+SQLITE3       ?= sqlite3
 SKIP_UNITTEST ?= 0
+SANITIZE      ?= 1
+
+ifeq ($(SANITIZE),1)
+TEST_SANITIZE := -fsanitize=address,undefined
+else
+TEST_SANITIZE :=
+endif
+
+# libadam.a contains miniaudio (via adam_audio.o) and libmtmd.a also embeds
+# miniaudio (via mtmd-helper.cpp.o). Strict linkers (GNU ld, lld) reject
+# the duplicate ma_atomic_global_lock symbol; Apple's ld merges silently.
+# `--allow-multiple-definition` makes GNU ld / lld pick the first
+# definition and continue — only needed for the test_adam link (the
+# shared-extension link uses --gc-sections + archive semantics that avoid
+# pulling mtmd-helper.o on most platforms).
+ifneq (,$(filter $(PLATFORM),macos ios ios-sim))
+TEST_MULDEF :=
+else
+TEST_MULDEF := -Wl,--allow-multiple-definition
+endif
+
+# llama.cpp/whisper.cpp objects are C++. On Apple, `cc` auto-links libc++
+# when it sees C++ symbols. On Android NDK and Linux, we need the C++
+# driver explicitly so libstdc++/libc++ is brought in.
+ifeq ($(PLATFORM),android)
+TEST_LD          := $(ANDROID_NDK_BIN)/$(NDK_TRIPLE)-clang++
+TEST_LD_EXTRA    := -static-libstdc++
+else ifneq (,$(filter $(PLATFORM),macos ios ios-sim))
+TEST_LD          := $(CC)
+TEST_LD_EXTRA    :=
+else
+TEST_LD          := c++
+TEST_LD_EXTRA    :=
+endif
 
 TEST_DEPS := $(DIST_DIR)/$(EXT_FILE)
 ifeq ($(SKIP_UNITTEST),0)
@@ -321,8 +359,8 @@ ifeq ($(SKIP_UNITTEST),0)
 endif
 
 test_adam: libadam.a test/test_adam.c
-	$(CC) $(CFLAGS) -O0 -g -fsanitize=address,undefined \
-		test/test_adam.c -L. -ladam $(LIBS) $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) -O0 -g $(TEST_SANITIZE) -c test/test_adam.c -o test_adam.o
+	$(TEST_LD) $(PLATFORM_CFLAGS) test_adam.o -L. -ladam $(LIBS) $(LDFLAGS) $(TEST_SANITIZE) $(TEST_LD_EXTRA) $(TEST_MULDEF) -o $@
 
 live: test_live
 	./test_live
