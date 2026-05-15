@@ -104,7 +104,7 @@ jobs:
     needs: download-models
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container && matrix.container || '' }}
-    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'ios-sim' && matrix.name != 'ios' && matrix.name != 'apple-xcframework' && matrix.name != 'android-aar' && ( matrix.name != 'macos' || matrix.arch != 'x86_64' ) && ' + test' || ''}}
+    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'ios-sim' && matrix.name != 'ios' && matrix.name != 'apple-xcframework' && matrix.name != 'android-aar' && ' + test' || ''}}
     timeout-minutes: 120
     env:
       # SANITIZE=0 disables -fsanitize=address,undefined for the test_adam
@@ -531,7 +531,11 @@ jobs:
           VULKAN_SDK: "C:/msys64/mingw64"
 
       - name: unix test adam extension
-        if: contains(matrix.name, 'linux') || ( matrix.name == 'macos' && matrix.arch != 'x86_64' )
+        if: contains(matrix.name, 'linux') || matrix.name == 'macos'
+        # The macos-15 runner is arm64; the macos x86_64 matrix entry produces
+        # a pure x86_64 binary and runs it via Rosetta 2 (preinstalled on the
+        # runner image).
+        #
         # SANITIZE=0 is the job-level default — pass it explicitly into the
         # linux-musl arm64 docker container (libasan/ubsan aren't in Alpine).
         run: ${{ contains(matrix.name, 'linux-musl') && matrix.arch == 'arm64' && 'docker exec -e SANITIZE alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
