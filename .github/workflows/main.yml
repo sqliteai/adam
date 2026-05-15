@@ -275,6 +275,22 @@ jobs:
         if: matrix.name == 'macos'
         run: brew link sqlite --force
 
+      - name: macos x86_64 build x86_64 sqlite3 shell
+        # The macos-15 runner is arm64; Homebrew's sqlite3 is arm64-only. To
+        # exercise `.load ./dist/adam.dylib` against an x86_64 dylib (this
+        # matrix entry's artifact) we need an x86_64 sqlite3 binary —
+        # Rosetta translates whole processes, not individual dlopen calls.
+        if: matrix.name == 'macos' && matrix.arch == 'x86_64'
+        run: |
+          curl -sLO https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
+          unzip -q sqlite-amalgamation-*.zip
+          cd sqlite-amalgamation-*
+          cc -arch x86_64 -O2 -DSQLITE_ENABLE_LOAD_EXTENSION \
+             shell.c sqlite3.c -o "$GITHUB_WORKSPACE/sqlite3_x86_64"
+          cd ..
+          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
+          echo "SQLITE3=$GITHUB_WORKSPACE/sqlite3_x86_64" >> "$GITHUB_ENV"
+
       - name: linux install dependencies
         if: startsWith(matrix.name, 'linux-cpu') || startsWith(matrix.name, 'linux-gpu')
         run: sudo apt-get update && sudo apt-get install -y libssl-dev
