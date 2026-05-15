@@ -77,10 +77,15 @@ SQLITE_FLAGS := -DSQLITE_THREADSAFE=1 \
                 -DSQLITE_OMIT_AUTOINIT
 
 # Android's bionic libc has pthread built in — no separate libpthread.so to link.
+# -lz lives at the END of LIBS (single-pass GNU ld + strict musl loader);
+# Windows pulls in -lws2_32 / -lcrypt32 / -lbcrypt there too. See the LIBS
+# blocks below.
 ifeq ($(PLATFORM),android)
-LDFLAGS := -lz
+LDFLAGS :=
+else ifeq ($(PLATFORM),windows)
+LDFLAGS :=
 else
-LDFLAGS := -lpthread -lz
+LDFLAGS := -lpthread
 endif
 
 # ============================================================================
@@ -98,6 +103,19 @@ LLAMA_LIBS := $(LLAMA_BUILD)/tools/mtmd/libmtmd.a \
               $(call ggml_lib,ggml) \
               $(call ggml_lib,ggml-cpu) \
               $(call ggml_lib,ggml-base)
+
+# Optional GPU backends — wildcards resolve only when llama.cpp was built
+# with -DGGML_VULKAN=ON / -DGGML_OPENCL=ON. Static archives go at the end
+# of LLAMA_LIBS; matching `-lvulkan` / `-lOpenCL` runtime loaders are
+# appended to LIBS by each platform block below.
+GGML_VULKAN_LIB := $(firstword $(wildcard $(LLAMA_BUILD)/ggml/src/ggml-vulkan/libggml-vulkan.a $(LLAMA_BUILD)/ggml/src/ggml-vulkan/ggml-vulkan.a))
+GGML_OPENCL_LIB := $(firstword $(wildcard $(LLAMA_BUILD)/ggml/src/ggml-opencl/libggml-opencl.a $(LLAMA_BUILD)/ggml/src/ggml-opencl/ggml-opencl.a))
+ifneq ($(GGML_VULKAN_LIB),)
+  LLAMA_LIBS += $(GGML_VULKAN_LIB)
+endif
+ifneq ($(GGML_OPENCL_LIB),)
+  LLAMA_LIBS += $(GGML_OPENCL_LIB)
+endif
 
 # Whisper uses llama's ggml (symlinked: whisper.cpp/ggml → llama.cpp/ggml).
 # Only libwhisper.a is needed — ggml symbols come from LLAMA_LIBS.
@@ -181,6 +199,7 @@ else ifeq ($(PLATFORM),android)
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
+  LIBS    += -lz
 else ifeq ($(PLATFORM),linux)
   # Linux: use libcurl + mbedtls
   CFLAGS  += -I$(CURL_DIR)/include -I$(MBEDTLS_DIR)/include
@@ -192,6 +211,13 @@ else ifeq ($(PLATFORM),linux)
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
+  ifneq ($(GGML_VULKAN_LIB),)
+    LIBS += -lvulkan
+  endif
+  ifneq ($(GGML_OPENCL_LIB),)
+    LIBS += -lOpenCL
+  endif
+  LIBS    += -lz
 else
   # Windows/other: use libcurl + mbedtls.
   # -DCURL_STATICLIB: curl.h on Windows declares functions as dllimport
@@ -205,6 +231,19 @@ else
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedtls.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedx509.a
   LIBS    += $(MBEDTLS_BUILD)/library/libmbedcrypto.a
+  # Win32 system libs MUST come after static archives that reference them
+  # (single-pass GNU ld). curl needs Winsock + crypt32; mbedtls needs
+  # bcrypt for BCryptGenRandom; curl uses zlib for gzip.
+  # The Vulkan loader DLL on Windows is `vulkan-1.dll`, so the import
+  # library is `libvulkan-1.dll.a` and the flag is `-lvulkan-1`.
+  LIBS    += -lws2_32 -lcrypt32 -lbcrypt
+  ifneq ($(GGML_VULKAN_LIB),)
+    LIBS += -lvulkan-1
+  endif
+  ifneq ($(GGML_OPENCL_LIB),)
+    LIBS += -lOpenCL
+  endif
+  LIBS    += -lz
 endif
 
 # ============================================================================
