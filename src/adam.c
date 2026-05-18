@@ -15,6 +15,7 @@
 // --- Windows compatibility ---
 #ifdef _WIN32
   #include <windows.h>
+  #include <io.h>      // _access
   #define realpath(p, r) _fullpath((r), (p), 260)
   static void adam_sleep_ms(int ms) { Sleep(ms); }
 #else
@@ -338,7 +339,10 @@ adam_status_t adam_settings_allow_dir(adam_settings_t *s, const char *dir_path) 
     // Resolve to canonical path
     char resolved[4096];
 #ifdef _WIN32
+    // _fullpath only normalizes — it does NOT check existence. To match
+    // POSIX realpath() semantics, follow up with _access(resolved, 0).
     if (!_fullpath(resolved, dir_path, sizeof(resolved))) return ADAM_ERR_INVALID_PARAM;
+    if (_access(resolved, 0) != 0) return ADAM_ERR_INVALID_PARAM;
 #elif defined(__EMSCRIPTEN__)
     // WASM: no realpath, just copy as-is
     snprintf(resolved, sizeof(resolved), "%s", dir_path);

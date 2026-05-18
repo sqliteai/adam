@@ -3673,12 +3673,15 @@ TEST(tool_shell_exec_basic) {
     ASSERT(strstr(r.for_llm, "hello") != NULL);
     ASSERT(strstr(r.for_llm, "exit code: 0") != NULL);
 
-    // Command that fails
+    // Command that fails. `false` doesn't exist on Windows cmd.exe — but
+    // any unknown command makes cmd.exe return a non-zero errorlevel
+    // (typically 1 or 9009), which is what we're really asserting.
     arena_reset(a);
     args = "{\"command\":\"false\"}";
     r = adam_tool_shell_exec(a, s, args, strlen(args));
     ASSERT_EQ(r.success, 0); // exit code != 0
-    ASSERT(strstr(r.for_llm, "exit code: 1") != NULL);
+    ASSERT(strstr(r.for_llm, "exit code:") != NULL);
+    ASSERT(strstr(r.for_llm, "exit code: 0") == NULL);
 
     arena_destroy(a);
     adam_settings_destroy(s);
@@ -5129,6 +5132,14 @@ TEST(perf_arena_churn) {
 int main(void) {
     printf("Adam Test Suite v%s\n", ADAM_VERSION_STRING);
     printf("============================================================\n");
+
+#ifdef _WIN32
+    // Tests use hardcoded `/tmp/...` paths. On MinGW binaries (no MSYS path
+    // translation), `/tmp/foo` resolves via Win32 to `<current-drive>:\tmp\foo`.
+    // Ensure that directory exists so fopen() / sqlite3_open / etc. succeed.
+    // EEXIST is fine.
+    adam_mkdir("/tmp", 0755);
+#endif
 
     adam_init();
     mem_report_start();
