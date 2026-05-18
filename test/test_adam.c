@@ -5133,15 +5133,15 @@ int main(void) {
     printf("Adam Test Suite v%s\n", ADAM_VERSION_STRING);
     printf("============================================================\n");
 
-#ifdef _WIN32
-    // Tests use hardcoded POSIX-style paths (`/tmp/...`, `/var`). On MinGW
-    // binaries (no MSYS path translation), those resolve via Win32 to
-    // `<current-drive>:\tmp` / `<current-drive>:\var`. Pre-create them so
-    // fopen() / sqlite3_open / adam_settings_allow_dir all see real dirs.
-    // EEXIST is harmless.
+    // Tests use hardcoded POSIX-style paths (`/tmp/...`, `/var`). Ensure
+    // both dirs exist before any test runs:
+    //   - Linux/macOS: already there, EEXIST is fine
+    //   - Windows MinGW: `/tmp` resolves to `<drive>:\tmp` (no MSYS path
+    //     translation in MinGW binaries); we create it
+    //   - Android: `/tmp` doesn't exist by default; needs adb root + remount
+    //     (already done in CI) for mkdir at / to succeed
     adam_mkdir("/tmp", 0755);
     adam_mkdir("/var", 0755);
-#endif
 
     adam_init();
     mem_report_start();
