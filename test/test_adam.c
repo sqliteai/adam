@@ -5134,11 +5134,13 @@ int main(void) {
     printf("============================================================\n");
 
 #ifdef _WIN32
-    // Tests use hardcoded `/tmp/...` paths. On MinGW binaries (no MSYS path
-    // translation), `/tmp/foo` resolves via Win32 to `<current-drive>:\tmp\foo`.
-    // Ensure that directory exists so fopen() / sqlite3_open / etc. succeed.
-    // EEXIST is fine.
+    // Tests use hardcoded POSIX-style paths (`/tmp/...`, `/var`). On MinGW
+    // binaries (no MSYS path translation), those resolve via Win32 to
+    // `<current-drive>:\tmp` / `<current-drive>:\var`. Pre-create them so
+    // fopen() / sqlite3_open / adam_settings_allow_dir all see real dirs.
+    // EEXIST is harmless.
     adam_mkdir("/tmp", 0755);
+    adam_mkdir("/var", 0755);
 #endif
 
     adam_init();
