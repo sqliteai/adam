@@ -57,7 +57,10 @@ endif
 # glibc strict-C11 hides strdup / strcasecmp / clock_gettime; Apple needs
 # _DARWIN_C_SOURCE; MinGW needs _GNU_SOURCE for strndup. Defining all three
 # is safe — each platform only honors the ones it knows about.
-CFLAGS := -std=gnu11 -Wall -Wextra -O2 -fPIC
+# Size-reduction flags applied uniformly to all SQLite-extension wrapper
+# objects (sqlite_adam.c + adam_ext_*.c). Pairs with -Wl,--gc-sections /
+# -Wl,-dead_strip + -flto in LDFLAGS below.
+CFLAGS := -std=gnu11 -Wall -Wextra -O2 -fPIC -ffunction-sections -fdata-sections -flto
 CFLAGS += -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -D_DARWIN_C_SOURCE=1
 CFLAGS += -I$(ADAM_ROOT)/src
 CFLAGS += -I$(ADAM_ROOT)/modules/sqlite
@@ -132,6 +135,16 @@ else ifeq ($(PLATFORM),windows)
   LDFLAGS :=
 else
   LDFLAGS := -lpthread
+endif
+
+# Dead-code elimination at link time + LTO across the wrapper objects and
+# the input static archives (those built with -DCMAKE_INTERPROCEDURAL_-
+# OPTIMIZATION=ON ship LLVM bitcode, so this can also collapse calls into
+# llama / whisper / curl / mbedtls).
+ifneq (,$(filter $(PLATFORM),macos ios ios-sim))
+  LDFLAGS += -Wl,-dead_strip -flto
+else
+  LDFLAGS += -Wl,--gc-sections -flto
 endif
 
 # ----------------------------------------------------------------------------

@@ -58,7 +58,15 @@ CURL_BUILD    := $(BUILD_DIR)/curl
 
 SQLITE_DIR := $(ADAM_ROOT)modules/sqlite
 
-CFLAGS := -std=gnu11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -Wall -Wextra -Wpedantic -O2 -fPIC
+# Size-reduction flags. -ffunction-sections / -fdata-sections puts each
+# function/variable into its own ELF section so the linker can drop unused
+# ones via --gc-sections / -dead_strip. -flto lets the linker inline and
+# eliminate dead code across translation units. On Mach-O the section flags
+# are no-ops (Apple's linker uses subsection-via-symbols), but -flto and
+# -Wl,-dead_strip still apply.
+SIZE_CFLAGS := -ffunction-sections -fdata-sections -flto
+
+CFLAGS := -std=gnu11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -Wall -Wextra -Wpedantic -O2 -fPIC $(SIZE_CFLAGS)
 CFLAGS += -Isrc -I$(MINIAUDIO_DIR) -I$(SQLITE_DIR)
 CFLAGS += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include -I$(LLAMA_DIR)/tools/mtmd
 CFLAGS += -I$(WHISPER_DIR)/include
@@ -86,6 +94,15 @@ else ifeq ($(PLATFORM),windows)
 LDFLAGS :=
 else
 LDFLAGS := -lpthread
+endif
+
+# Dead-code elimination at link time. Pairs with -ffunction-sections /
+# -fdata-sections / -flto in CFLAGS. Apple's linker uses -dead_strip
+# (subsection-via-symbols); GNU ld + lld use --gc-sections.
+ifneq (,$(filter $(PLATFORM),macos ios ios-sim))
+LDFLAGS += -Wl,-dead_strip -flto
+else
+LDFLAGS += -Wl,--gc-sections -flto
 endif
 
 # ============================================================================
@@ -505,6 +522,19 @@ ifeq ($(UNAME_S),Linux)
 deps: build/mbedtls.stamp build/curl.stamp
 endif
 
+# Flags passed to every cmake dep build (llama / whisper / mbedtls / curl):
+#   -fPIC                          archives are linked into a shared lib
+#   -ffunction-sections / -fdata-  let the final linker drop unused symbols
+#       sections                   (gc-sections / dead_strip)
+#   -fvisibility=hidden            don't pollute the .so dynamic symbol table
+#       (-fvisibility-inlines-     with llama/ggml/whisper internals — we
+#       hidden for C++)             only need to export adam_* + sqlite3_*
+#   -flto                          link-time inlining + dead code elimination
+# Combined with -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON cmake also enables
+# LTO at link time of any internal static archives.
+DEP_CFLAGS   := -fPIC -ffunction-sections -fdata-sections -fvisibility=hidden -flto
+DEP_CXXFLAGS := $(DEP_CFLAGS) -fvisibility-inlines-hidden
+
 # Stamp targets: cacheable in CI and idempotent for local dev.
 $(BUILD_DIR)/llama.cpp.stamp:
 	@mkdir -p $(BUILD_DIR)
@@ -517,8 +547,9 @@ $(BUILD_DIR)/llama.cpp.stamp:
 		-DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF \
 		-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
 		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
 		-DCMAKE_STATIC_LIBRARY_PREFIX=lib \
-		-DCMAKE_C_FLAGS=-fPIC -DCMAKE_CXX_FLAGS=-fPIC \
+		-DCMAKE_C_FLAGS="$(DEP_CFLAGS)" -DCMAKE_CXX_FLAGS="$(DEP_CXXFLAGS)" \
 		-DGGML_OPENMP=OFF \
 		$(PLATFORM_OPTS) $(LLAMA)
 	cmake --build $(LLAMA_BUILD) --config Release -j$(CPUS) --target llama --target ggml --target mtmd
@@ -533,8 +564,9 @@ $(BUILD_DIR)/whisper.cpp.stamp: $(BUILD_DIR)/llama.cpp.stamp
 		-DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF \
 		-DWHISPER_BUILD_EXAMPLES=OFF \
 		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
 		-DCMAKE_STATIC_LIBRARY_PREFIX=lib \
-		-DCMAKE_C_FLAGS=-fPIC -DCMAKE_CXX_FLAGS=-fPIC \
+		-DCMAKE_C_FLAGS="$(DEP_CFLAGS)" -DCMAKE_CXX_FLAGS="$(DEP_CXXFLAGS)" \
 		-DGGML_OPENMP=OFF \
 		$(PLATFORM_OPTS) $(LLAMA) $(WHISPER)
 	cmake --build $(WHISPER_BUILD) --config Release -j$(CPUS) --target whisper
@@ -557,6 +589,8 @@ $(BUILD_DIR)/mbedtls.stamp:
 		-DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
 		-DMBEDTLS_FATAL_WARNINGS=OFF \
 		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+		-DCMAKE_C_FLAGS="$(DEP_CFLAGS)" -DCMAKE_CXX_FLAGS="$(DEP_CXXFLAGS)" \
 		$(PLATFORM_OPTS)
 	cmake --build $(MBEDTLS_BUILD) --config Release -j$(CPUS)
 	touch $@
@@ -569,7 +603,8 @@ $(BUILD_DIR)/curl.stamp: $(BUILD_DIR)/mbedtls.stamp
 		-DUSE_LIBIDN2=OFF -DCURL_USE_LIBPSL=OFF -DCURL_USE_LIBSSH2=OFF \
 		-DBUILD_SHARED_LIBS=OFF -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF \
 		-DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-		-DCMAKE_C_FLAGS=-fPIC -DCMAKE_CXX_FLAGS=-fPIC \
+		-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+		-DCMAKE_C_FLAGS="$(DEP_CFLAGS)" -DCMAKE_CXX_FLAGS="$(DEP_CXXFLAGS)" \
 		-DMBEDTLS_INCLUDE_DIR=$(MBEDTLS_DIR)/include \
 		-DMBEDTLS_LIBRARY=$(MBEDTLS_BUILD)/library/libmbedtls.a \
 		-DMBEDX509_LIBRARY=$(MBEDTLS_BUILD)/library/libmbedx509.a \
@@ -633,12 +668,31 @@ ifeq (,$(filter $(PLATFORM),macos ios ios-sim))
   EXT_DEPS += $(BUILD_DIR)/mbedtls.stamp $(BUILD_DIR)/curl.stamp
 endif
 
+# Strip the final shared object to drop debug symbols and the static symbol
+# table. The dynamic symbol table (which holds sqlite3_adam_init) is in a
+# separate ELF/Mach-O section and is preserved. Set `STRIP_DIST=0` to keep
+# symbols (e.g., for local debugging of the shipped artifact).
+STRIP_DIST ?= 1
+ifeq ($(PLATFORM),android)
+  STRIP       := $(ANDROID_NDK_BIN)/llvm-strip
+  STRIP_FLAGS := --strip-all
+else ifneq (,$(filter $(PLATFORM),macos ios ios-sim))
+  STRIP       := strip
+  STRIP_FLAGS := -x
+else
+  STRIP       := strip
+  STRIP_FLAGS := --strip-unneeded
+endif
+
 extension: $(DIST_DIR)/$(EXT_FILE)
 
 $(DIST_DIR)/$(EXT_FILE): $(EXT_DEPS) libadam.a
 	@mkdir -p $(DIST_DIR)
 	$(MAKE) -C extensions/sqlite all PLATFORM=$(PLATFORM) ARCH=$(ARCH)
 	cp extensions/sqlite/$(EXT_FILE) $(DIST_DIR)/$(EXT_FILE)
+ifeq ($(STRIP_DIST),1)
+	$(STRIP) $(STRIP_FLAGS) $(DIST_DIR)/$(EXT_FILE)
+endif
 
 # Apple XCFramework — builds adam.dylib three times (macos, ios, ios-sim) and
 # bundles them into dist/adam.xcframework with framework metadata.
