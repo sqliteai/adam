@@ -31,6 +31,19 @@
 #define adam_mkdir(p, m) mkdir((p), (m))
 #endif
 
+// Platform-portable temp / second directory used by file-sandbox tests.
+// Android's `/` is a read-only rootfs (no mkdir, no symlink); the writable
+// scratch dir is `/data/local/tmp`. Other platforms keep the POSIX defaults.
+// String concatenation lets us inline these into both plain paths
+// (`TEST_TMP "/foo.db"`) and JSON args (`"{\"path\":\"" TEST_TMP "/foo\"}"`).
+#ifdef __ANDROID__
+  #define TEST_TMP "/data/local/tmp"
+  #define TEST_VAR "/data"
+#else
+  #define TEST_TMP "/tmp"
+  #define TEST_VAR "/var"
+#endif
+
 #ifndef ADAM_NO_PTHREADS
 #include <pthread.h>
 #endif
@@ -2453,7 +2466,7 @@ TEST(local_with_stream_callback) {
 #include <unistd.h>
 
 TEST(session_open_close) {
-    const char *path = "/tmp/adam_test_session.db";
+    const char *path = TEST_TMP "/adam_test_session.db";
     unlink(path);
     adam_memory_t *mem = adam_memory_open(path);
     ASSERT_NOT_NULL(mem);
@@ -2462,7 +2475,7 @@ TEST(session_open_close) {
 }
 
 TEST(session_save_load_simple) {
-    const char *path = "/tmp/adam_test_session2.db";
+    const char *path = TEST_TMP "/adam_test_session2.db";
     unlink(path);
     adam_memory_t *mem = adam_memory_open(path);
     ASSERT_NOT_NULL(mem);
@@ -2499,7 +2512,7 @@ TEST(session_save_load_simple) {
 }
 
 TEST(session_save_load_with_tool_calls) {
-    const char *path = "/tmp/adam_test_session3.db";
+    const char *path = TEST_TMP "/adam_test_session3.db";
     unlink(path);
     adam_memory_t *mem = adam_memory_open(path);
 
@@ -2546,7 +2559,7 @@ TEST(session_save_load_with_tool_calls) {
 }
 
 TEST(session_list_and_delete) {
-    const char *path = "/tmp/adam_test_session4.db";
+    const char *path = TEST_TMP "/adam_test_session4.db";
     unlink(path);
     adam_memory_t *mem = adam_memory_open(path);
 
@@ -2593,7 +2606,7 @@ TEST(session_list_and_delete) {
 
 TEST(session_overwrite) {
     // Saving the same session_id twice should replace the old data
-    const char *path = "/tmp/adam_test_session5.db";
+    const char *path = TEST_TMP "/adam_test_session5.db";
     unlink(path);
     adam_memory_t *mem = adam_memory_open(path);
 
@@ -2622,7 +2635,7 @@ TEST(session_overwrite) {
 
 TEST(session_persistence_across_reopen) {
     // Data survives closing and reopening the database
-    const char *path = "/tmp/adam_test_session6.db";
+    const char *path = TEST_TMP "/adam_test_session6.db";
     unlink(path);
 
     // Open, save, close
@@ -3552,29 +3565,29 @@ TEST(tool_file_read_sandbox) {
     ASSERT(strstr(r.for_llm, "denied") != NULL);
 
     // Allow /tmp
-    ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
+    ASSERT_EQ(adam_settings_allow_dir(s, TEST_TMP), ADAM_OK);
 
     // Write a test file
-    FILE *f = fopen("/tmp/adam_test_read.txt", "w");
+    FILE *f = fopen(TEST_TMP "/adam_test_read.txt", "w");
     ASSERT_NOT_NULL(f);
     fprintf(f, "hello from adam test");
     fclose(f);
 
     // Read it — should succeed
     arena_reset(a);
-    args = "{\"path\":\"/tmp/adam_test_read.txt\"}";
+    args = "{\"path\":\"" TEST_TMP "/adam_test_read.txt\"}";
     r = adam_tool_file_read(a, s, args, strlen(args));
     ASSERT_EQ(r.success, 1);
     ASSERT_STR_EQ(r.for_llm, "hello from adam test");
 
     // Try to escape sandbox
     arena_reset(a);
-    args = "{\"path\":\"/tmp/../etc/hosts\"}";
+    args = "{\"path\":\"" TEST_TMP "/../etc/hosts\"}";
     r = adam_tool_file_read(a, s, args, strlen(args));
     ASSERT_EQ(r.success, 0);
     ASSERT(strstr(r.for_llm, "denied") != NULL);
 
-    remove("/tmp/adam_test_read.txt");
+    remove(TEST_TMP "/adam_test_read.txt");
     arena_destroy(a);
     adam_settings_destroy(s);
 }
@@ -3582,17 +3595,17 @@ TEST(tool_file_read_sandbox) {
 TEST(tool_file_write_sandbox) {
     arena_t *a = arena_create(4096);
     adam_settings_t *s = adam_create_settings();
-    ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
+    ASSERT_EQ(adam_settings_allow_dir(s, TEST_TMP), ADAM_OK);
 
     // Write a file
-    const char *args = "{\"path\":\"/tmp/adam_test_write.txt\","
+    const char *args = "{\"path\":\"" TEST_TMP "/adam_test_write.txt\","
                        "\"content\":\"test content\"}";
     adam_tool_result_t r = adam_tool_file_write(a, s, args, strlen(args));
     ASSERT_EQ(r.success, 1);
     ASSERT(strstr(r.for_llm, "Wrote") != NULL);
 
     // Verify contents
-    FILE *f = fopen("/tmp/adam_test_write.txt", "r");
+    FILE *f = fopen(TEST_TMP "/adam_test_write.txt", "r");
     ASSERT_NOT_NULL(f);
     char buf[64];
     size_t n = fread(buf, 1, 63, f);
@@ -3602,12 +3615,12 @@ TEST(tool_file_write_sandbox) {
 
     // Append
     arena_reset(a);
-    args = "{\"path\":\"/tmp/adam_test_write.txt\","
+    args = "{\"path\":\"" TEST_TMP "/adam_test_write.txt\","
            "\"content\":\" appended\",\"append\":true}";
     r = adam_tool_file_write(a, s, args, strlen(args));
     ASSERT_EQ(r.success, 1);
 
-    f = fopen("/tmp/adam_test_write.txt", "r");
+    f = fopen(TEST_TMP "/adam_test_write.txt", "r");
     n = fread(buf, 1, 63, f);
     buf[n] = '\0';
     fclose(f);
@@ -3620,7 +3633,7 @@ TEST(tool_file_write_sandbox) {
     ASSERT_EQ(r.success, 0);
     ASSERT(strstr(r.for_llm, "denied") != NULL);
 
-    remove("/tmp/adam_test_write.txt");
+    remove(TEST_TMP "/adam_test_write.txt");
     arena_destroy(a);
     adam_settings_destroy(s);
 }
@@ -3628,14 +3641,14 @@ TEST(tool_file_write_sandbox) {
 TEST(tool_list_directory_sandbox) {
     arena_t *a = arena_create(64 * 1024);
     adam_settings_t *s = adam_create_settings();
-    ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
+    ASSERT_EQ(adam_settings_allow_dir(s, TEST_TMP), ADAM_OK);
 
     // Create test directory with a file
-    adam_mkdir("/tmp/adam_test_dir", 0755);
-    FILE *f = fopen("/tmp/adam_test_dir/test.txt", "w");
+    adam_mkdir(TEST_TMP "/adam_test_dir", 0755);
+    FILE *f = fopen(TEST_TMP "/adam_test_dir/test.txt", "w");
     if (f) { fputs("x", f); fclose(f); }
 
-    const char *args = "{\"path\":\"/tmp/adam_test_dir\"}";
+    const char *args = "{\"path\":\"" TEST_TMP "/adam_test_dir\"}";
     adam_tool_result_t r = adam_tool_list_directory(a, s, args, strlen(args));
     ASSERT_EQ(r.success, 1);
     ASSERT(strstr(r.for_llm, "test.txt") != NULL);
@@ -3647,8 +3660,8 @@ TEST(tool_list_directory_sandbox) {
     r = adam_tool_list_directory(a, s, args, strlen(args));
     ASSERT_EQ(r.success, 0);
 
-    remove("/tmp/adam_test_dir/test.txt");
-    rmdir("/tmp/adam_test_dir");
+    remove(TEST_TMP "/adam_test_dir/test.txt");
+    rmdir(TEST_TMP "/adam_test_dir");
     arena_destroy(a);
     adam_settings_destroy(s);
 }
@@ -3664,7 +3677,7 @@ TEST(tool_shell_exec_basic) {
     ASSERT(strstr(r.for_llm, "denied") != NULL);
 
     // Allow /tmp
-    ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
+    ASSERT_EQ(adam_settings_allow_dir(s, TEST_TMP), ADAM_OK);
 
     // Simple echo
     arena_reset(a);
@@ -3691,13 +3704,13 @@ TEST(tool_allow_dir) {
     adam_settings_t *s = adam_create_settings();
 
     ASSERT_EQ(s->allowed_dir_count, 0);
-    ASSERT_EQ(adam_settings_allow_dir(s, "/tmp"), ADAM_OK);
+    ASSERT_EQ(adam_settings_allow_dir(s, TEST_TMP), ADAM_OK);
     ASSERT_EQ(s->allowed_dir_count, 1);
-    ASSERT_EQ(adam_settings_allow_dir(s, "/var"), ADAM_OK);
+    ASSERT_EQ(adam_settings_allow_dir(s, TEST_VAR), ADAM_OK);
     ASSERT_EQ(s->allowed_dir_count, 2);
 
     // NULL params
-    ASSERT_EQ(adam_settings_allow_dir(NULL, "/tmp"), ADAM_ERR_INVALID_PARAM);
+    ASSERT_EQ(adam_settings_allow_dir(NULL, TEST_TMP), ADAM_ERR_INVALID_PARAM);
     ASSERT_EQ(adam_settings_allow_dir(s, NULL), ADAM_ERR_INVALID_PARAM);
 
     // Nonexistent dir
@@ -4892,18 +4905,18 @@ TEST(integration_json_output) {
 TEST(integration_file_tools_sandbox) {
     // Write a file, read it back, list directory — all sandboxed
     adam_settings_t *s = adam_create_settings();
-    adam_settings_allow_dir(s, "/tmp");
+    adam_settings_allow_dir(s, TEST_TMP);
     arena_t *a = arena_create(64 * 1024);
 
     // Write
-    const char *w_args = "{\"path\":\"/tmp/adam_integ_test.txt\","
+    const char *w_args = "{\"path\":\"" TEST_TMP "/adam_integ_test.txt\","
                          "\"content\":\"Hello from integration test!\"}";
     adam_tool_result_t wr = adam_tool_file_write(a, s, w_args, strlen(w_args));
     ASSERT_EQ(wr.success, 1);
 
     // Read back
     arena_reset(a);
-    const char *r_args = "{\"path\":\"/tmp/adam_integ_test.txt\"}";
+    const char *r_args = "{\"path\":\"" TEST_TMP "/adam_integ_test.txt\"}";
     adam_tool_result_t rr = adam_tool_file_read(a, s, r_args, strlen(r_args));
     ASSERT_EQ(rr.success, 1);
     ASSERT_STR_EQ(rr.for_llm, "Hello from integration test!");
@@ -4922,7 +4935,7 @@ TEST(integration_file_tools_sandbox) {
     ASSERT_EQ(dr.success, 0);
     ASSERT(strstr(dr.for_llm, "denied") != NULL);
 
-    remove("/tmp/adam_integ_test.txt");
+    remove(TEST_TMP "/adam_integ_test.txt");
     arena_destroy(a);
     adam_settings_destroy(s);
 }
@@ -5133,15 +5146,11 @@ int main(void) {
     printf("Adam Test Suite v%s\n", ADAM_VERSION_STRING);
     printf("============================================================\n");
 
-    // Tests use hardcoded POSIX-style paths (`/tmp/...`, `/var`). Ensure
-    // both dirs exist before any test runs:
-    //   - Linux/macOS: already there, EEXIST is fine
-    //   - Windows MinGW: `/tmp` resolves to `<drive>:\tmp` (no MSYS path
-    //     translation in MinGW binaries); we create it
-    //   - Android: `/tmp` doesn't exist by default; needs adb root + remount
-    //     (already done in CI) for mkdir at / to succeed
-    adam_mkdir("/tmp", 0755);
-    adam_mkdir("/var", 0755);
+    // TEST_TMP / TEST_VAR map to platform-writable dirs (see top of file).
+    // Ensure TEST_TMP exists so the file-sandbox / session tests can fopen /
+    // sqlite3_open inside it. EEXIST is fine; on Android the dir is already
+    // there (/data/local/tmp) and mkdir is a no-op.
+    adam_mkdir(TEST_TMP, 0755);
 
     adam_init();
     mem_report_start();
