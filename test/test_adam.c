@@ -4923,7 +4923,7 @@ TEST(integration_file_tools_sandbox) {
 
     // List directory containing the file
     arena_reset(a);
-    const char *l_args = "{\"path\":\"/tmp\"}";
+    const char *l_args = "{\"path\":\"" TEST_TMP "\"}";
     adam_tool_result_t lr = adam_tool_list_directory(a, s, l_args, strlen(l_args));
     ASSERT_EQ(lr.success, 1);
     ASSERT(strstr(lr.for_llm, "adam_integ_test.txt") != NULL);
@@ -5147,10 +5147,12 @@ int main(void) {
     printf("============================================================\n");
 
     // TEST_TMP / TEST_VAR map to platform-writable dirs (see top of file).
-    // Ensure TEST_TMP exists so the file-sandbox / session tests can fopen /
-    // sqlite3_open inside it. EEXIST is fine; on Android the dir is already
-    // there (/data/local/tmp) and mkdir is a no-op.
+    // Ensure both exist so the file-sandbox / session / allow-dir tests can
+    // realpath() them. EEXIST is fine; on POSIX hosts the dirs are already
+    // there, on Windows MinGW we create them under the current drive root,
+    // on Android both point at /data/* which already exist.
     adam_mkdir(TEST_TMP, 0755);
+    adam_mkdir(TEST_VAR, 0755);
 
     adam_init();
     mem_report_start();

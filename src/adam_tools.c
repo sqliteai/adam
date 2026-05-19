@@ -615,8 +615,13 @@ adam_tool_result_t adam_tool_shell_exec(arena_t *arena, void *ctx,
     snprintf(full_cmd, cmd_size,
         "cd /d \"%s\" && cmd /c \"%s\" 2>&1",
         s->allowed_dirs[0], command);
-#elif defined(__APPLE__) || defined(__ANDROID__) || defined(__ios__)
-    // macOS/iOS/Android: no GNU timeout command
+#elif defined(__ANDROID__)
+    // Android has no /bin — sh lives at /system/bin/sh.
+    snprintf(full_cmd, cmd_size,
+        "cd \"%s\" && /system/bin/sh -c '%s' 2>&1",
+        s->allowed_dirs[0], command);
+#elif defined(__APPLE__) || defined(__ios__)
+    // macOS/iOS: no GNU timeout command
     snprintf(full_cmd, cmd_size,
         "cd \"%s\" && /bin/sh -c '%s' 2>&1",
         s->allowed_dirs[0], command);
