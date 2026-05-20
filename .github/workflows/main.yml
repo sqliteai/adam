@@ -237,15 +237,17 @@ jobs:
           MINIAUDIO_HASH=$(git -C modules/miniaudio rev-parse HEAD)
           MBEDTLS_HASH=$(git -C modules/mbedtls rev-parse HEAD)
           CURL_HASH=$(git -C modules/curl rev-parse HEAD)
+          # Hash both Makefiles together — extensions/sqlite/Makefile changes
+          # the link step (CFLAGS / LDFLAGS) and so should invalidate dep caches.
           if command -v sha256sum >/dev/null 2>&1; then
             MAKE_HASH=$(echo "$MATRIX_MAKE" | sha256sum | cut -d' ' -f1)
-            MAKEFILE_HASH=$(sha256sum Makefile | cut -d' ' -f1)
+            MAKEFILE_HASH=$(cat Makefile extensions/sqlite/Makefile | sha256sum | cut -d' ' -f1)
           elif command -v shasum >/dev/null 2>&1; then
             MAKE_HASH=$(echo "$MATRIX_MAKE" | shasum -a 256 | cut -d' ' -f1)
-            MAKEFILE_HASH=$(shasum -a 256 Makefile | cut -d' ' -f1)
+            MAKEFILE_HASH=$(cat Makefile extensions/sqlite/Makefile | shasum -a 256 | cut -d' ' -f1)
           else
             MAKE_HASH=$(echo "$MATRIX_MAKE" | openssl dgst -sha256 | cut -d' ' -f2)
-            MAKEFILE_HASH=$(openssl dgst -sha256 Makefile | cut -d' ' -f2)
+            MAKEFILE_HASH=$(cat Makefile extensions/sqlite/Makefile | openssl dgst -sha256 | cut -d' ' -f2)
           fi
           echo "llama=$LLAMA_HASH" >> $GITHUB_OUTPUT
           echo "whisper=$WHISPER_HASH" >> $GITHUB_OUTPUT

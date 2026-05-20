@@ -57,9 +57,7 @@ endif
 # glibc strict-C11 hides strdup / strcasecmp / clock_gettime; Apple needs
 # _DARWIN_C_SOURCE; MinGW needs _GNU_SOURCE for strndup. Defining all three
 # is safe — each platform only honors the ones it knows about.
-# Size-reduction flags applied uniformly to all SQLite-extension wrapper
-# objects (sqlite_adam.c + adam_ext_*.c). Pairs with -Wl,--gc-sections /
-# -Wl,-dead_strip + -flto in LDFLAGS below.
+# Section flags pair with -Wl,--gc-sections / -Wl,-dead_strip below.
 CFLAGS := -std=gnu11 -Wall -Wextra -O2 -fPIC -ffunction-sections -fdata-sections -flto
 CFLAGS += -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -D_DARWIN_C_SOURCE=1
 CFLAGS += -I$(ADAM_ROOT)/src
