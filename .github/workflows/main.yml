@@ -628,26 +628,35 @@ jobs:
         run: cd packages/android && ./gradlew publishAggregationToCentralPortal -PSIGNING_KEY="${{ secrets.SIGNING_KEY }}" -PSIGNING_PASSWORD="${{ secrets.SIGNING_PASSWORD }}" -PSONATYPE_USERNAME="${{ secrets.MAVEN_CENTRAL_USERNAME }}" -PSONATYPE_PASSWORD="${{ secrets.MAVEN_CENTRAL_TOKEN }}" -PVERSION="${{ steps.tag.outputs.version }}" -PAAR_PATH="../../artifacts/adam-android-aar/adam.aar"
 
       - name: update Package.swift checksum and version
+        id: package-swift
         if: steps.tag.outputs.version != ''
         run: |
           VERSION=${{ steps.tag.outputs.version }}
           ZIP="adam-apple-xcframework-${VERSION}.zip"
-          if [ -f "$ZIP" ]; then
-            CHECKSUM=$(swift package compute-checksum "$ZIP")
-            URL="https://github.com/sqliteai/adam/releases/download/${VERSION}/${ZIP}"
-            sed -i "s|url: \".*apple-xcframework.*\"|url: \"${URL}\"|" Package.swift
-            sed -i "s|checksum: \".*\"|checksum: \"${CHECKSUM}\"|" Package.swift
-            git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
-            git config --global user.name "$GITHUB_ACTOR"
-            git add Package.swift
-            git commit -m "Update Package.swift checksum for ${VERSION} [auto-update]" || true
-            git push origin main || true
+          if [ ! -f "$ZIP" ]; then
+            echo "::warning::xcframework artifact not found; skipping Package.swift update"
+            exit 0
           fi
+          CHECKSUM=$(swift package compute-checksum "$ZIP")
+          URL="https://github.com/sqliteai/adam/releases/download/${VERSION}/${ZIP}"
+          sed -i "s|url: \".*apple-xcframework.*\"|url: \"${URL}\"|" Package.swift
+          sed -i "s|checksum: \".*\"|checksum: \"${CHECKSUM}\"|" Package.swift
+          if git diff --quiet Package.swift; then
+            echo "Package.swift already up to date for ${VERSION}"
+            exit 0
+          fi
+          git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git config --global user.name "$GITHUB_ACTOR"
+          git add Package.swift
+          git commit -m "Update Package.swift checksum for ${VERSION} [auto-update]"
+          git push origin main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
         with:
           token: ${{ secrets.RELEASE_PAT }}
+          target_commitish: ${{ steps.package-swift.outputs.sha }}
           body: |
             # Packages
 
