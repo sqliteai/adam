@@ -27,6 +27,17 @@ endif
 # Non-empty when building for an Apple platform (macos / ios / ios-sim).
 IS_APPLE := $(filter $(PLATFORM),macos ios ios-sim)
 
+# Shared-extension filename per platform. Defined here (not down in the CI
+# section) because the test target references EXT_FILE before that section
+# is parsed, and `:=` would otherwise capture an empty value.
+ifeq ($(PLATFORM),windows)
+  EXT_FILE := adam.dll
+else ifneq ($(IS_APPLE),)
+  EXT_FILE := adam.dylib
+else
+  EXT_FILE := adam.so
+endif
+
 # CMake options pass-through from CI matrix
 LLAMA     ?=
 WHISPER   ?=
@@ -634,18 +645,6 @@ version:
 
 # Loadable SQLite extension: dist/adam.{dylib,so,dll}.
 # Wraps extensions/sqlite/Makefile after libadam.a + dependencies are built.
-ifeq ($(PLATFORM),windows)
-  EXT_FILE := adam.dll
-else ifeq ($(PLATFORM),macos)
-  EXT_FILE := adam.dylib
-else ifeq ($(PLATFORM),ios)
-  EXT_FILE := adam.dylib
-else ifeq ($(PLATFORM),ios-sim)
-  EXT_FILE := adam.dylib
-else
-  EXT_FILE := adam.so
-endif
-
 # Non-Apple platforms (linux, windows, android) need libcurl + mbedtls.
 EXT_DEPS := $(BUILD_DIR)/llama.cpp.stamp $(BUILD_DIR)/whisper.cpp.stamp $(BUILD_DIR)/miniaudio.stamp
 ifeq ($(IS_APPLE),)
