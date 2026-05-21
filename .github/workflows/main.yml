@@ -1,0 +1,672 @@
+name: Build, Test and Release
+on:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  GGUF_MODEL_DIR: tests/models/unsloth/gemma-3-270m-it-GGUF
+  GGUF_MODEL_NAME: gemma-3-270m-it-UD-IQ2_M.gguf
+  GGUF_MODEL_URL: https://huggingface.co/unsloth/gemma-3-270m-it-GGUF/resolve/main/gemma-3-270m-it-UD-IQ2_M.gguf
+  WHISPER_MODEL_DIR: tests/models/ggerganov/whisper-tiny
+  WHISPER_MODEL_NAME: ggml-tiny.bin
+  WHISPER_MODEL_URL: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+  AUDIO_TEST_DIR: tests/audio
+  AUDIO_TEST_WAV: tests/audio/jfk.wav
+  AUDIO_TEST_WAV_URL: https://github.com/ggml-org/whisper.cpp/raw/master/samples/jfk.wav
+
+jobs:
+  download-models:
+    if: ${{ !contains(github.event.head_commit.message, '[auto-update]') }}
+    outputs:
+      gguf-cache-key: gguf-${{ steps.meta.outputs.gguf-hash }}
+      gguf-model-path: ${{ env.GGUF_MODEL_DIR }}/${{ env.GGUF_MODEL_NAME }}
+      whisper-cache-key: whisper-${{ steps.meta.outputs.whisper-hash }}
+      whisper-model-path: ${{ env.WHISPER_MODEL_DIR }}/${{ env.WHISPER_MODEL_NAME }}
+      audio-cache-key: audio-${{ steps.meta.outputs.audio-hash }}
+      audio-test-path: ${{ env.AUDIO_TEST_WAV }}
+    name: Download models and test assets
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Compute URL hashes
+        id: meta
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            gguf_hash=$(echo -n "${{ env.GGUF_MODEL_URL }}" | sha256sum | cut -d' ' -f1)
+            whisper_hash=$(echo -n "${{ env.WHISPER_MODEL_URL }}" | sha256sum | cut -d' ' -f1)
+            audio_hash=$(echo -n "${{ env.AUDIO_TEST_WAV_URL }}" | sha256sum | cut -d' ' -f1)
+          else
+            gguf_hash=$(echo -n "${{ env.GGUF_MODEL_URL }}" | shasum -a 256 | cut -d' ' -f1)
+            whisper_hash=$(echo -n "${{ env.WHISPER_MODEL_URL }}" | shasum -a 256 | cut -d' ' -f1)
+            audio_hash=$(echo -n "${{ env.AUDIO_TEST_WAV_URL }}" | shasum -a 256 | cut -d' ' -f1)
+          fi
+          echo "gguf-hash=$gguf_hash" >> "$GITHUB_OUTPUT"
+          echo "whisper-hash=$whisper_hash" >> "$GITHUB_OUTPUT"
+          echo "audio-hash=$audio_hash" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare directories
+        run: |
+          mkdir -p "${{ env.GGUF_MODEL_DIR }}"
+          mkdir -p "${{ env.WHISPER_MODEL_DIR }}"
+          mkdir -p "${{ env.AUDIO_TEST_DIR }}"
+
+      - name: Restore GGUF cache
+        id: cache-gguf
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.GGUF_MODEL_DIR }}/${{ env.GGUF_MODEL_NAME }}
+          key: gguf-${{ steps.meta.outputs.gguf-hash }}
+
+      - name: Download GGUF model
+        if: steps.cache-gguf.outputs.cache-hit != 'true'
+        run: curl -L --fail --retry 3 "${{ env.GGUF_MODEL_URL }}" -o "${{ env.GGUF_MODEL_DIR }}/${{ env.GGUF_MODEL_NAME }}"
+
+      - name: Verify GGUF model
+        run: test -f "${{ env.GGUF_MODEL_DIR }}/${{ env.GGUF_MODEL_NAME }}"
+
+      - name: Restore Whisper cache
+        id: cache-whisper
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WHISPER_MODEL_DIR }}/${{ env.WHISPER_MODEL_NAME }}
+          key: whisper-${{ steps.meta.outputs.whisper-hash }}
+
+      - name: Download Whisper model
+        if: steps.cache-whisper.outputs.cache-hit != 'true'
+        run: curl -L --fail --retry 3 "${{ env.WHISPER_MODEL_URL }}" -o "${{ env.WHISPER_MODEL_DIR }}/${{ env.WHISPER_MODEL_NAME }}"
+
+      - name: Verify Whisper model
+        run: test -f "${{ env.WHISPER_MODEL_DIR }}/${{ env.WHISPER_MODEL_NAME }}"
+
+      - name: Restore audio test file cache
+        id: cache-audio
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.AUDIO_TEST_WAV }}
+          key: audio-${{ steps.meta.outputs.audio-hash }}
+
+      - name: Download audio test file
+        if: steps.cache-audio.outputs.cache-hit != 'true'
+        run: curl -L --fail --retry 3 "${{ env.AUDIO_TEST_WAV_URL }}" -o "${{ env.AUDIO_TEST_WAV }}"
+
+      - name: Verify audio test file
+        run: test -f "${{ env.AUDIO_TEST_WAV }}"
+
+  build:
+    if: ${{ !contains(github.event.head_commit.message, '[auto-update]') }}
+    needs: download-models
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container && matrix.container || '' }}
+    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'ios-sim' && matrix.name != 'ios' && matrix.name != 'apple-xcframework' && matrix.name != 'android-aar' && ' + test' || ''}}
+    timeout-minutes: 120
+    env:
+      # SANITIZE=0 disables -fsanitize=address,undefined for the test_adam
+      # binary. Libasan/libubsan aren't shipped in Alpine musl or MinGW,
+      # and ASan + cross-arch emulators tend to fight. Local dev keeps
+      # sanitizers on by default; CI keeps the test fast and portable.
+      SANITIZE: 0
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            name: macos
+            make: LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple" WHISPER="-DWHISPER_COREML=ON -DWHISPER_COREML_ALLOW_FALLBACK=ON"
+          - os: macos-15
+            arch: x86_64
+            name: macos
+            make: ARCH=x86_64 LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple" WHISPER="-DWHISPER_COREML=ON -DWHISPER_COREML_ALLOW_FALLBACK=ON"
+          - os: macos-15
+            arch: arm64
+            name: macos
+            make: ARCH=arm64 LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple" WHISPER="-DWHISPER_COREML=ON -DWHISPER_COREML_ALLOW_FALLBACK=ON"
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux-cpu
+            make: LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_AVX2=ON"
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux-gpu
+            make: LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_VULKAN=ON -DGGML_OPENCL=ON"
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux-cpu
+            make: LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_CPU_ARM_ARCH=armv8.2-a"
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux-gpu
+            make: LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_VULKAN=ON -DGGML_OPENCL=ON"
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux-musl-cpu
+            container: alpine:latest
+            make: LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_AVX2=ON"
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux-musl-cpu
+            make: LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_CPU_ARM_ARCH=armv8.2-a"
+          - os: windows-2022
+            arch: x86_64
+            name: windows-cpu
+            make: LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_AVX2=ON"
+          - os: windows-2022
+            arch: x86_64
+            name: windows-gpu
+            make: LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_VULKAN=ON -DGGML_OPENCL=ON"
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: android
+            make: PLATFORM=android ARCH=x86_64
+            sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
+          - os: ubuntu-22.04
+            arch: arm64-v8a
+            name: android
+            make: PLATFORM=android ARCH=arm64-v8a
+          - os: macos-15
+            name: ios
+            make: PLATFORM=ios LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple" WHISPER="-DWHISPER_COREML=ON -DWHISPER_COREML_ALLOW_FALLBACK=ON"
+          - os: macos-15
+            name: ios-sim
+            make: PLATFORM=ios-sim LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple" WHISPER="-DWHISPER_COREML=ON -DWHISPER_COREML_ALLOW_FALLBACK=ON"
+          - os: macos-15
+            name: apple-xcframework
+            make: xcframework LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple" WHISPER="-DWHISPER_COREML=ON -DWHISPER_COREML_ALLOW_FALLBACK=ON"
+          - os: ubuntu-22.04
+            name: android-aar
+            make: aar
+
+    defaults:
+      run:
+        shell: ${{ matrix.container && 'sh' || 'bash' }}
+
+    steps:
+
+      - name: linux-musl x86_64 install dependencies
+        if: contains(matrix.name, 'linux-musl') && matrix.arch == 'x86_64'
+        run: apk update && apk add --no-cache git gcc g++ make cmake sqlite musl-dev linux-headers python3 curl-dev openssl-dev zlib-dev
+
+      - uses: actions/checkout@v4.2.2
+        with:
+          submodules: true
+
+      - name: Prepare test asset directories
+        run: |
+          mkdir -p "${{ env.GGUF_MODEL_DIR }}"
+          mkdir -p "${{ env.WHISPER_MODEL_DIR }}"
+          mkdir -p "${{ env.AUDIO_TEST_DIR }}"
+
+      - name: Restore GGUF cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ needs.download-models.outputs.gguf-model-path }}
+          key: ${{ needs.download-models.outputs.gguf-cache-key }}
+
+      - name: Restore Whisper cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ needs.download-models.outputs.whisper-model-path }}
+          key: ${{ needs.download-models.outputs.whisper-cache-key }}
+
+      - name: Restore audio test file cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ needs.download-models.outputs.audio-test-path }}
+          key: ${{ needs.download-models.outputs.audio-cache-key }}
+
+      - name: android setup java
+        if: matrix.name == 'android-aar'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: calculate cache version hashes for modules and dependencies
+        id: submodule-hashes
+        env:
+          MATRIX_MAKE: ${{ matrix.make && matrix.make || '' }}
+        run: |
+          LLAMA_HASH=$(git -C modules/llama.cpp rev-parse HEAD)
+          WHISPER_HASH=$(git -C modules/whisper.cpp rev-parse HEAD)
+          MINIAUDIO_HASH=$(git -C modules/miniaudio rev-parse HEAD)
+          MBEDTLS_HASH=$(git -C modules/mbedtls rev-parse HEAD)
+          CURL_HASH=$(git -C modules/curl rev-parse HEAD)
+          # Hash both Makefiles together — extensions/sqlite/Makefile changes
+          # the link step (CFLAGS / LDFLAGS) and so should invalidate dep caches.
+          if command -v sha256sum >/dev/null 2>&1; then
+            MAKE_HASH=$(echo "$MATRIX_MAKE" | sha256sum | cut -d' ' -f1)
+            MAKEFILE_HASH=$(cat Makefile extensions/sqlite/Makefile | sha256sum | cut -d' ' -f1)
+          elif command -v shasum >/dev/null 2>&1; then
+            MAKE_HASH=$(echo "$MATRIX_MAKE" | shasum -a 256 | cut -d' ' -f1)
+            MAKEFILE_HASH=$(cat Makefile extensions/sqlite/Makefile | shasum -a 256 | cut -d' ' -f1)
+          else
+            MAKE_HASH=$(echo "$MATRIX_MAKE" | openssl dgst -sha256 | cut -d' ' -f2)
+            MAKEFILE_HASH=$(cat Makefile extensions/sqlite/Makefile | openssl dgst -sha256 | cut -d' ' -f2)
+          fi
+          echo "llama=$LLAMA_HASH" >> $GITHUB_OUTPUT
+          echo "whisper=$WHISPER_HASH" >> $GITHUB_OUTPUT
+          echo "miniaudio=$MINIAUDIO_HASH" >> $GITHUB_OUTPUT
+          echo "mbedtls=$MBEDTLS_HASH" >> $GITHUB_OUTPUT
+          echo "curl=$CURL_HASH" >> $GITHUB_OUTPUT
+          echo "make=$MAKE_HASH" >> $GITHUB_OUTPUT
+          echo "makefile=$MAKEFILE_HASH" >> $GITHUB_OUTPUT
+
+      - uses: msys2/setup-msys2@v2.27.0
+        if: matrix.os == 'windows-2022'
+        with:
+          msystem: mingw64
+          install: >-
+            git
+            make
+            sqlite
+            mingw-w64-x86_64-cc
+            mingw-w64-x86_64-cmake
+            ${{ matrix.name == 'windows-gpu' && 'mingw-w64-x86_64-vulkan-headers' || '' }}
+            ${{ matrix.name == 'windows-gpu' && 'mingw-w64-x86_64-vulkan-loader' || '' }}
+            ${{ matrix.name == 'windows-gpu' && 'mingw-w64-x86_64-shaderc' || '' }}
+            ${{ matrix.name == 'windows-gpu' && 'mingw-w64-x86_64-opencl-headers' || '' }}
+            ${{ matrix.name == 'windows-gpu' && 'mingw-w64-x86_64-opencl-icd' || '' }}
+
+      - name: macos install dependencies
+        if: matrix.name == 'macos'
+        run: brew link sqlite --force
+
+      - name: macos x86_64 build x86_64 sqlite3 shell
+        # The macos-15 runner is arm64; Homebrew's sqlite3 is arm64-only. To
+        # exercise `.load ./dist/adam.dylib` against an x86_64 dylib (this
+        # matrix entry's artifact) we need an x86_64 sqlite3 binary —
+        # Rosetta translates whole processes, not individual dlopen calls.
+        if: matrix.name == 'macos' && matrix.arch == 'x86_64'
+        run: |
+          curl -sLO https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
+          unzip -q sqlite-amalgamation-*.zip
+          cd sqlite-amalgamation-*
+          cc -arch x86_64 -O2 -DSQLITE_ENABLE_LOAD_EXTENSION \
+             shell.c sqlite3.c -o "$GITHUB_WORKSPACE/sqlite3_x86_64"
+          cd ..
+          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
+          echo "SQLITE3=$GITHUB_WORKSPACE/sqlite3_x86_64" >> "$GITHUB_ENV"
+
+      - name: linux install dependencies
+        if: startsWith(matrix.name, 'linux-cpu') || startsWith(matrix.name, 'linux-gpu')
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: linux-musl arm64 setup container
+        if: contains(matrix.name, 'linux-musl') && matrix.arch == 'arm64'
+        run: |
+          docker run -d --name alpine \
+            --platform linux/arm64 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            alpine:latest \
+            tail -f /dev/null
+          docker exec alpine sh -c "apk update && apk add --no-cache git gcc g++ make cmake sqlite musl-dev linux-headers python3 curl-dev openssl-dev zlib-dev"
+          # Tell git inside the container that the bind-mounted workspace is
+          # safe — git runs as root in the container while the files are
+          # owned by the runner user, which trips git's "dubious ownership"
+          # check.
+          docker exec alpine git config --global --add safe.directory '*'
+
+      - name: linux install opencl
+        if: matrix.name == 'linux-gpu'
+        run: sudo apt-get install -y opencl-headers ocl-icd-opencl-dev
+
+      - name: linux-x86_64 install vulkan
+        if: matrix.name == 'linux-gpu' && matrix.arch == 'x86_64'
+        run: |
+          # ggml-vulkan.cpp uses Vulkan symbols (PipelineRobustnessCreateInfoEXT,
+          # CooperativeMatrixFeaturesKHR, LayerSettingEXT, eMesaDozen, …)
+          # introduced in 1.4+. Jammy's libvulkan-dev ships 1.3.204 headers
+          # (too old), but its loader libvulkan.so is forward-compatible —
+          # 1.4 functions get resolved through vkGetInstanceProcAddr at
+          # runtime, not at link time. So: apt for the loader + drivers,
+          # LunarG SDK for the 1.4 headers + glslc, and a symlink so cmake's
+          # FindVulkan resolves Vulkan_LIBRARY against the apt-installed
+          # loader when VULKAN_SDK is set.
+          sudo apt-get update -y
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan-dev
+          wget -q https://sdk.lunarg.com/sdk/download/latest/linux/vulkan-sdk.tar.xz -O /tmp/vulkan-sdk.tar.xz
+          mkdir /tmp/vulkan-sdk && tar -xf /tmp/vulkan-sdk.tar.xz -C /tmp/vulkan-sdk
+          SDK_DIR=$(ls -d /tmp/vulkan-sdk/1.* | head -n1)
+          sudo mkdir -p /opt/vulkan-sdk/lib
+          sudo cp -r "$SDK_DIR/x86_64/include" /opt/vulkan-sdk/include
+          sudo cp -r "$SDK_DIR/x86_64/bin"     /opt/vulkan-sdk/bin
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libvulkan.so /opt/vulkan-sdk/lib/libvulkan.so
+          rm -rf /tmp/vulkan-sdk /tmp/vulkan-sdk.tar.xz
+          echo "VULKAN_SDK=/opt/vulkan-sdk" >> $GITHUB_ENV
+          echo "/opt/vulkan-sdk/bin" >> $GITHUB_PATH
+
+      - name: linux-arm64 install vulkan
+        if: matrix.name == 'linux-gpu' && matrix.arch == 'arm64'
+        run: |
+          sudo dpkg --add-architecture arm64
+
+          # Add arch-specific repositories for non-amd64 architectures
+          cat << EOF | sudo tee /etc/apt/sources.list.d/arm64-ports.list
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-updates main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-security main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-backports main universe
+          EOF
+
+          sudo apt-get update || true    ;# Prevent failure due to missing URLs.
+          # On noble the binary package providing /usr/bin/glslc is `glslc`
+          # (the `shaderc` name is only the source package).
+          sudo apt-get install -y --no-install-recommends build-essential glslc crossbuild-essential-arm64 libvulkan-dev:arm64
+
+      - name: cache llama.cpp build
+        id: cache-llama
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/llama.cpp
+            build/llama.cpp.stamp
+          key: llama-${{ matrix.name }}-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.submodule-hashes.outputs.llama }}-${{ hashFiles('modules/llama.cpp/**') }}-${{ steps.submodule-hashes.outputs.make }}-${{ steps.submodule-hashes.outputs.makefile }}
+
+      - name: cache whisper.cpp build
+        id: cache-whisper
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/whisper.cpp
+            build/whisper.cpp.stamp
+          key: whisper-${{ matrix.name }}-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.submodule-hashes.outputs.whisper }}-${{ hashFiles('modules/whisper.cpp/**') }}-${{ steps.submodule-hashes.outputs.make }}-${{ steps.submodule-hashes.outputs.makefile }}
+
+      - name: cache miniaudio build
+        id: cache-miniaudio
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/miniaudio
+            build/miniaudio.stamp
+          key: miniaudio-${{ matrix.name }}-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.submodule-hashes.outputs.miniaudio }}-${{ hashFiles('modules/miniaudio/**') }}-${{ steps.submodule-hashes.outputs.make }}-${{ steps.submodule-hashes.outputs.makefile }}
+
+      - name: cache mbedtls build
+        if: contains(matrix.name, 'linux') || matrix.name == 'android' || contains(matrix.name, 'windows')
+        id: cache-mbedtls
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/mbedtls
+            build/mbedtls.stamp
+          key: mbedtls-${{ matrix.name }}-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.submodule-hashes.outputs.mbedtls }}-${{ steps.submodule-hashes.outputs.make }}-${{ steps.submodule-hashes.outputs.makefile }}
+
+      - name: cache curl build
+        if: contains(matrix.name, 'linux') || matrix.name == 'android' || contains(matrix.name, 'windows')
+        id: cache-curl
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/curl
+            build/curl.stamp
+          key: curl-${{ matrix.name }}-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.submodule-hashes.outputs.curl }}-${{ steps.submodule-hashes.outputs.mbedtls }}-${{ steps.submodule-hashes.outputs.make }}-${{ steps.submodule-hashes.outputs.makefile }}
+
+      - name: windows build llama.cpp
+        if: matrix.os == 'windows-2022' && steps.cache-llama.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: make build/llama.cpp.stamp ${{ matrix.make && matrix.make || ''}}
+        env:
+          VULKAN_SDK: "C:/msys64/mingw64"
+
+      - name: unix build llama.cpp
+        if: matrix.os != 'windows-2022' && matrix.name != 'android-aar' && matrix.name != 'apple-xcframework' && steps.cache-llama.outputs.cache-hit != 'true'
+        run: ${{ contains(matrix.name, 'linux-musl') && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make build/llama.cpp.stamp ${{ matrix.make && matrix.make || ''}}
+
+      - name: windows build whisper.cpp
+        if: matrix.os == 'windows-2022' && steps.cache-whisper.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: make build/whisper.cpp.stamp ${{ matrix.make && matrix.make || ''}}
+        env:
+          VULKAN_SDK: "C:/msys64/mingw64"
+
+      - name: unix build whisper.cpp
+        if: matrix.os != 'windows-2022' && matrix.name != 'android-aar' && matrix.name != 'apple-xcframework' && steps.cache-whisper.outputs.cache-hit != 'true'
+        run: ${{ contains(matrix.name, 'linux-musl') && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make build/whisper.cpp.stamp ${{ matrix.make && matrix.make || ''}}
+
+      - name: windows build miniaudio
+        if: matrix.os == 'windows-2022' && steps.cache-miniaudio.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: make build/miniaudio.stamp ${{ matrix.make && matrix.make || ''}}
+
+      - name: unix build miniaudio
+        if: matrix.os != 'windows-2022' && matrix.name != 'android-aar' && matrix.name != 'apple-xcframework' && steps.cache-miniaudio.outputs.cache-hit != 'true'
+        run: ${{ contains(matrix.name, 'linux-musl') && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make build/miniaudio.stamp ${{ matrix.make && matrix.make || ''}}
+
+      - name: unix build mbedtls + curl
+        if: (contains(matrix.name, 'linux') || matrix.name == 'android') && matrix.name != 'android-aar' && (steps.cache-mbedtls.outputs.cache-hit != 'true' || steps.cache-curl.outputs.cache-hit != 'true')
+        run: ${{ contains(matrix.name, 'linux-musl') && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make build/mbedtls.stamp build/curl.stamp ${{ matrix.make && matrix.make || ''}}
+
+      - name: windows build mbedtls + curl
+        if: contains(matrix.name, 'windows') && (steps.cache-mbedtls.outputs.cache-hit != 'true' || steps.cache-curl.outputs.cache-hit != 'true')
+        shell: msys2 {0}
+        run: make build/mbedtls.stamp build/curl.stamp ${{ matrix.make && matrix.make || ''}}
+
+      - name: windows build adam extension
+        if: matrix.os == 'windows-2022'
+        run: make extension ${{ matrix.make && matrix.make || ''}}
+        shell: msys2 {0}
+        env:
+          VULKAN_SDK: "C:/msys64/mingw64"
+
+      - name: unix build adam extension
+        if: matrix.os != 'windows-2022' && matrix.name != 'android-aar' && matrix.name != 'apple-xcframework'
+        run: ${{ contains(matrix.name, 'linux-musl') && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make extension ${{ matrix.make && matrix.make || ''}}
+
+      - name: build aar/xcframework
+        if: matrix.name == 'android-aar' || matrix.name == 'apple-xcframework'
+        run: make ${{ matrix.make && matrix.make || ''}}
+
+      - name: create keychain for codesign
+        if: matrix.os == 'macos-15'
+        run: |
+          echo "${{ secrets.APPLE_CERTIFICATE }}" | base64 --decode > certificate.p12
+          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+          security import certificate.p12 -k build.keychain -P "${{ secrets.CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+
+      - name: codesign and notarize dylib
+        if: matrix.os == 'macos-15' && matrix.name != 'apple-xcframework'
+        run: |
+          codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/adam.dylib
+          ditto -c -k dist/adam.dylib dist/adam.zip
+          xcrun notarytool submit dist/adam.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+          rm dist/adam.zip
+
+      - name: codesign and notarize xcframework
+        if: matrix.name == 'apple-xcframework'
+        run: |
+          find dist/adam.xcframework -name "*.framework" -exec echo "Signing: {}" \; -exec codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime {} \; # Sign each individual framework FIRST
+          codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/adam.xcframework # Then sign the xcframework wrapper
+          ditto -c -k --keepParent dist/adam.xcframework dist/adam.xcframework.zip
+          xcrun notarytool submit dist/adam.xcframework.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+          rm -rf dist/adam.xcframework
+
+      - name: cleanup keychain for codesign
+        if: matrix.os == 'macos-15'
+        run: |
+          rm certificate.p12
+          security delete-keychain build.keychain
+
+      - name: android setup test environment
+        if: matrix.name == 'android' && matrix.arch == 'x86_64'
+        run: |
+
+          echo "::group::enable kvm group perms"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          echo "::endgroup::"
+
+          echo "::group::download and build sqlite3 without SQLITE_OMIT_LOAD_EXTENSION"
+          curl -O ${{ matrix.sqlite-amalgamation-zip }}
+          unzip sqlite-amalgamation-*.zip
+          export ${{ matrix.make }}
+          $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.arch }}-linux-android26-clang sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
+          # remove unused folders to save up space
+          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
+          echo "::endgroup::"
+
+          echo "::group::prepare the test script"
+          make test PLATFORM=$PLATFORM ARCH=$ARCH || echo "It should fail. Running remaining commands in the emulator"
+          cat > commands.sh << EOF
+            mv -f /data/local/tmp/sqlite3 /system/xbin
+            cd /data/local/tmp
+            $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
+          EOF
+          # remove big unused folders to avoid emulator errors
+          echo "::endgroup::"
+
+      - name: android test adam extension
+        if: matrix.name == 'android' && matrix.arch == 'x86_64'
+        uses: reactivecircus/android-emulator-runner@v2.34.0
+        with:
+          api-level: 26
+          arch: ${{ matrix.arch }}
+          script: |
+            adb root
+            adb remount
+            adb push ${{ github.workspace }}/commands.sh /data/local/tmp/
+            adb push ${{ github.workspace }}/sqlite3 /data/local/tmp/
+            adb push ${{ github.workspace }}/dist /data/local/tmp/
+            adb push ${{ github.workspace }}/Makefile /data/local/tmp/
+            adb push ${{ github.workspace }}/test_adam /data/local/tmp/
+            adb shell "chmod +x /data/local/tmp/test_adam"
+            adb shell "sh /data/local/tmp/commands.sh"
+
+      - name: windows test adam extension
+        if: matrix.os == 'windows-2022'
+        run: make test ${{ matrix.make && matrix.make || ''}}
+        shell: msys2 {0}
+        env:
+          VULKAN_SDK: "C:/msys64/mingw64"
+
+      - name: unix test adam extension
+        if: contains(matrix.name, 'linux') || matrix.name == 'macos'
+        # The macos-15 runner is arm64; the macos x86_64 matrix entry produces
+        # a pure x86_64 binary and runs it via Rosetta 2 (preinstalled on the
+        # runner image).
+        #
+        # SANITIZE=0 is the job-level default — pass it explicitly into the
+        # linux-musl arm64 docker container (libasan/ubsan aren't in Alpine).
+        run: ${{ contains(matrix.name, 'linux-musl') && matrix.arch == 'arm64' && 'docker exec -e SANITIZE alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
+
+      - uses: actions/upload-artifact@v4.6.2
+        if: always()
+        with:
+          name: adam-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
+          path: dist/adam.*
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-22.04
+    name: release
+    needs: build
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/download-artifact@v4.2.1
+        with:
+          path: artifacts
+
+      - name: zip artifacts
+        run: |
+          VERSION=$(make version)
+          for folder in "artifacts"/*; do
+            if [ -d "$folder" ]; then
+              name=$(basename "$folder")
+              if [[ "$name" != "adam-apple-xcframework" && "$name" != "adam-android-aar" ]]; then
+                tar -czf "${name}-${VERSION}.tar.gz" -C "$folder" .
+              fi
+              if [[ "$name" == "adam-apple-xcframework" ]]; then
+                # Use the ditto-created zip that preserves macOS symlinks and extract for other steps
+                cp "$folder/adam.xcframework.zip" "${name}-${VERSION}.zip"
+                unzip -q "$folder/adam.xcframework.zip" -d "$folder/"
+              elif [[ "$name" != "adam-android-aar" ]]; then
+                (cd "$folder" && zip -rq "../../${name}-${VERSION}.zip" .)
+              else
+                cp "$folder"/*.aar "${name}-${VERSION}.aar"
+              fi
+            fi
+          done
+
+      - name: release tag version from adam.h
+        id: tag
+        run: |
+          VERSION=$(make version)
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest)
+            LATEST=$(echo "$LATEST_RELEASE" | jq -r '.name')
+            if [[ "$VERSION" != "$LATEST" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "version=$VERSION" >> $GITHUB_OUTPUT
+            else
+              echo "::warning file=src/adam.h::To release a new version, please update the ADAM_VERSION_STRING in src/adam.h to be different than the latest $LATEST"
+            fi
+            exit 0
+          fi
+          echo "❌ ADAM_VERSION_STRING not found in src/adam.h"
+          exit 1
+
+      - uses: actions/setup-java@v4
+        if: steps.tag.outputs.version != ''
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: release android aar to maven central
+        if: steps.tag.outputs.version != ''
+        run: cd packages/android && ./gradlew publishAggregationToCentralPortal -PSIGNING_KEY="${{ secrets.SIGNING_KEY }}" -PSIGNING_PASSWORD="${{ secrets.SIGNING_PASSWORD }}" -PSONATYPE_USERNAME="${{ secrets.MAVEN_CENTRAL_USERNAME }}" -PSONATYPE_PASSWORD="${{ secrets.MAVEN_CENTRAL_TOKEN }}" -PVERSION="${{ steps.tag.outputs.version }}" -PAAR_PATH="../../artifacts/adam-android-aar/adam.aar"
+
+      - name: update Package.swift checksum and version
+        id: package-swift
+        if: steps.tag.outputs.version != ''
+        run: |
+          VERSION=${{ steps.tag.outputs.version }}
+          ZIP="adam-apple-xcframework-${VERSION}.zip"
+          if [ ! -f "$ZIP" ]; then
+            echo "::warning::xcframework artifact not found; skipping Package.swift update"
+            exit 0
+          fi
+          CHECKSUM=$(swift package compute-checksum "$ZIP")
+          URL="https://github.com/sqliteai/adam/releases/download/${VERSION}/${ZIP}"
+          sed -i "s|url: \".*apple-xcframework.*\"|url: \"${URL}\"|" Package.swift
+          sed -i "s|checksum: \".*\"|checksum: \"${CHECKSUM}\"|" Package.swift
+          if git diff --quiet Package.swift; then
+            echo "Package.swift already up to date for ${VERSION}"
+            exit 0
+          fi
+          git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git config --global user.name "$GITHUB_ACTOR"
+          git add Package.swift
+          git commit -m "Update Package.swift checksum for ${VERSION} [auto-update]"
+          git push origin main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2.2.1
+        if: steps.tag.outputs.version != ''
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+          target_commitish: ${{ steps.package-swift.outputs.sha }}
+          body: |
+            # Packages
+
+            [**Flutter/Dart**](https://pub.dev/packages/sqlite_adam): `flutter pub add sqlite_adam:${{ steps.tag.outputs.version }}` or `dart pub add sqlite_adam:${{ steps.tag.outputs.version }}`
+            [**Android**](https://central.sonatype.com/artifact/ai.sqlite/adam): `ai.sqlite:adam:${{ steps.tag.outputs.version }}`
+            [**Swift**](https://github.com/sqliteai/adam#swift-package): [Installation Guide](https://github.com/sqliteai/adam#swift-package)
+
+            ---
+
+          generate_release_notes: true
+          tag_name: ${{ steps.tag.outputs.version }}
+          files: adam-*-${{ steps.tag.outputs.version }}.*
+          make_latest: true

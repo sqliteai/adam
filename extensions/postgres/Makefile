@@ -14,10 +14,10 @@ OBJS = pg_adam.o \
        ../src/adam_ext_schema.o \
        ../src/adam_ext_chat.o
 
-# Adam library and dependencies
+# Adam library and dependencies (build tree shared with extensions/sqlite via top-level build/).
 ADAM_LIB := $(ADAM_ROOT)/libadam.a
-LLAMA_BUILD := $(ADAM_ROOT)/modules/llama.cpp/build
-WHISPER_BUILD := $(ADAM_ROOT)/modules/whisper.cpp/build
+LLAMA_BUILD := $(ADAM_ROOT)/build/llama.cpp
+WHISPER_BUILD := $(ADAM_ROOT)/build/whisper.cpp
 
 SHLIB_LINK := $(ADAM_LIB) \
               $(WHISPER_BUILD)/src/libwhisper.a \
@@ -39,10 +39,10 @@ ifeq ($(UNAME_S),Darwin)
                 -framework AVFoundation
 else
   SHLIB_LINK := -Wl,--no-as-needed $(SHLIB_LINK) -lgomp \
-                $(ADAM_ROOT)/modules/curl/build/lib/libcurl.a \
-                $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedtls.a \
-                $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedx509.a \
-                $(ADAM_ROOT)/modules/mbedtls/build/library/libmbedcrypto.a \
+                $(ADAM_ROOT)/build/curl/lib/libcurl.a \
+                $(ADAM_ROOT)/build/mbedtls/library/libmbedtls.a \
+                $(ADAM_ROOT)/build/mbedtls/library/libmbedx509.a \
+                $(ADAM_ROOT)/build/mbedtls/library/libmbedcrypto.a \
                 -ldl -lm
 endif
 
